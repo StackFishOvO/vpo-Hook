@@ -1,0 +1,57 @@
+# VPO-Hook 默认配置（simple 基础安全组）
+# 用户运行 `vpo-hook init` 后会生成此文件到 ~/.vpo-hook/config.yaml
+#
+# 注意：本文件是「用户编辑的源配置」。启动器负责解析它，再把策略展开成
+# 环境变量（如 VPO_DENY_PATHS）传给二进制 hook 的策略引擎。
+
+profile: simple            # simple | custom
+
+intercept:                 # 拦截的出口类别开关
+  io: true
+  network: true
+  process: true
+  mapping: true
+
+policy:
+  deny_paths:              # 路径黑名单：命中即拒绝（精确匹配 + 目录前缀）
+    - "/etc/passwd"
+    - "~/.ssh"
+    - "~/.aws"
+    - "~/.vpo-test-data"
+    # 需要保护自己的示例/测试数据时，改成绝对路径加入，例如：
+    # - "/home/you/vpoh/example/sensitive_data"
+  allow_network:           # 网络白名单（第一版支持 IP:port，域名解析后续）
+    - "8.8.8.8:53"
+  high_risk_markers:       # 数据标记：write/sendto 的 buffer 含这些词即拦截
+    - "token"
+    - "secret"
+    - "password"
+  rewrite_on_deny: true    # 拒绝时是否改写参数（改写为蜜罐数据）
+  honeypot_map:            # deny 时改写到的蜜罐路径（由蜜罐运维脚本生成）
+    "/etc/passwd": "~/.vpo-hook/honeypot/passwd"
+    "~/.ssh": "~/.vpo-hook/honeypot/ssh"
+    "~/.aws": "~/.vpo-hook/honeypot/aws"
+    "~/.vpo-test-data": "~/.vpo-hook/honeypot/testdata"
+
+marks:                     # 名文 hook 开关（接口级）
+  js: true
+  python: true
+
+plaintext:                 # 名文 hook（接口级）要拦截的同名 API 列表
+  python:
+    - "os.system"
+    - "posix.system"
+    - "subprocess.run"
+  js:
+    - "child_process.execSync"
+
+audit:                     # 对象创建审计（默认关闭，合规追查用，只做记录不做鉴权）
+  enabled: false           # 默认关闭，零开销；设为 true 才启用
+  log: "~/.vpo-hook/audit.log"
+  classes:                 # 要审计的敏感类（记录创建时的调用链）
+    python:
+      - "subprocess.Popen"
+      - "socket.socket"
+    js:
+      - "net.Socket"
+      - "child_process.ChildProcess"

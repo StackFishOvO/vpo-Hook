@@ -1,0 +1,390 @@
+
+---
+
+# VPO-Hook 后续开发指导文档
+
+## 一、项目定位（给 AI 的定调，先读这段）
+
+VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口级**纵深防御工具，目标用户是：跑**开源本地 AI Agent** 和**未经验证的 pip/npm 包**的普通用户、没时间审包的技术人、需要合规证据的公司。
+
+核心机制已跑通：macOS 用 `DYLD_INTERPOSE` + 私有符号（`__open`、`$NOCANCEL`），Linux 用同名符号 + `dlsym(RTLD_NEXT)`，名文层用 Python `setattr` 代理 + Node `Proxy`。蜜罐改写、`CapabilityDenied` 已实测生效。
+
+**一句话定调**：这是“提高偷数据成本和失败率”的工具，不是“保证偷不到”的沙箱。对机会主义供应链投毒和开源 Agent 的常规遥测有效，对静态编译、直接 `syscall`、主动反检测、子进程逃逸会漏。**所有开发决策都要围绕“让普通人装上就有保护、技术人能定制、公司能审计”展开，不要追求“防住一切”**。
+
+---
+
+## 二、能做什么 / 不做什么（明确边界，避免 AI 跑偏）
+
+### 应该做（优先级从高到低）
+
+1. **把 `simple` 安全组默认值做狠**。当前 `allow_network` 为空时 `policy.c` 默认放行所有网络，和“防外泄”定位矛盾。要改成：`network_mode: allowlist | denylist | off` 三态，`simple` 默认 `allowlist` + 空列表 = **拒绝所有出站**，用户显式加白名单才放行。`deny_paths` 默认列表要覆盖浏览器 cookie 目录、`~/.config` 下 token 存储、`~/.gitconfig`、`~/.npmrc`。
+2. **子进程环境继承**。`execve`/`execv`/`execvp` 的 wrapper 要把 `DYLD_INSERT_LIBRARIES`/`LD_PRELOAD`/`PYTHONPATH`/`VPO_HOOK_PY_API`/`NODE_OPTIONS` 注入子进程 `envp`。这是当前最大的安全洞，Agent 一次 `fork`+`exec` 就逃逸。
+3. **结构化审计日志 + `vpo-hook log` 命令**。JSON Lines 格式：`{"ts":..., "pid":..., "exe":..., "func":"open", "path":"~/.ssh/id_rsa", "decision":"REWRITE", "honeypot":"..."}`。日志是**所有人都有权用的基础能力**，不是企业版专属。`vpo-hook log` 打印最近记录，让用户“看见”拦截。
+4. **`vpo-hook run --dry-run`**：只记录不拦截，输出“将会被拦截的调用列表”，技术人改配置前先干跑。
+5. **`vpo-hook run --non-interactive`**：CI 用，遇 DENY 退出码非零。
+6. **预置 profile 组合**：`strict`、`web-only`、`no-network`、`read-only`，每个是 YAML 片段，可 `include` 组合。技术人不用从零写 YAML。
+7. **策略包导入导出 + 签名验证**。导入时 schema 校验、显示 diff、验证签名来源（官方/社区区分）。**防的是“导入别人的恶意策略把 deny 清空”**。
+8. **弹窗从 `build` 挪到 `run` 首次运行，粒度是“能力组 + 目标类别”**，不是单次调用。二进制层不能同步弹窗（你 `vpo_hook.h` 的判断是对的），只能异步通知 + 本次拒绝 + 下次放行；要有超时默认拒绝。
+9. **`nm -u` + AST 扫描做能力发现**，输出“能力清单 + 置信度”。native 模块用 `nm -u`，纯脚本用 `ast`/`acorn`。扫描失败默认“未知能力 = 高危”，不能默认安全。弹窗措辞用能力级（“这个包可以读文件”），不用目标级（“它要读你的 SSH 密钥”）。
+10. **反检测脚手架（给框架不给成品）**：对抗点清单文档、符号随机化构建选项、`vpo-hook selfcheck` 命令。让用户 + AI 在这个框架里迭代，不要自己追着 Agent 厂商跑。
+11. **AI 生成配置用填空模板约束输出**，不是自由写 YAML。AI 从候选列表（由 `signatures.json` 和预置安全组提供）里选，token 可控、输出可校验。
+
+### 明确不做（避免 AI 浪费精力）
+
+1. **本机编译优先，预编译库兜底**。用户明确要求优先用**用户本机 C 编译器**，避免预编译库和本机 libc 版本不匹配；当前 `init` 本机编译保留并作为默认路径。发布版仍应提供预编译库，作为没装编译器用户的 fallback（或首启下载产物）。`gen_wrappers` 仍是发布侧工具，用户侧只编译已生成的 wrapper。预编译库生成方案见 6.2。
+2. **不支持 Windows**。启动器检测到 Windows 直接报错退出。
+3. **当前阶段不做配置加密；配置完整性优先用签名**。用户后续希望用本机密钥对做解密/防篡改，但本机私钥对同 uid 的 guest 不构成边界，详见 6.8。先预留 `version`/`signature` 字段，YAML 解析重构独立推进。
+4. **不做 `seccomp` 兜底（Phase 1）**。直接 `syscall()` 绕过留到后续 Phase。
+5. **不用非对称加密加密 obj/文件数据本身**。非对称只用于**授权凭证签名**或**包装对称密钥**。数据加密走对称（AES）。对象审计只对**日志记录**做签名/加密，不加密运行时对象，详见 6.7。
+6. **不做“attach 到运行中进程”**。`ptrace` 在 macOS 受 SIP 限制、Linux 需 `CAP_SYS_PTRACE`，普通人不配。启动器 `exec` 时注入是零权限要求的，优先这个。
+7. **不把 taint tracking 定位成“跨进程/跨机器溯源”**。只能做“进程内数据流审计”，性能开销大，放企业版。
+8. **不追求“防住定向攻击/主动反检测/静态编译二进制”**。这些是猫鼠游戏，交给用户 + AI 在脚手架里迭代。
+9. **不要用 `README` 承诺“防得住”**。用“提高门槛”“审计+污染”“面向本地设计，生产自评”。
+
+---
+
+## 三、待修 bug 清单（按优先级，给 AI 逐个修）
+
+### P0（本周修，影响功能/安全）
+
+**A. 手写 YAML 解析器是最大技术债（保留 YAML，重构待定）**
+- **问题**：`vpo_hook.py`/`cli.py` 有 `parse_deny_paths`、`parse_yaml_list`、`parse_honeypot_map`、`parse_audit`、`parse_plaintext_apis` 五个手写解析器，各写各的，假设 block style、缩进、分隔符。用户写 flow style、多行字符串、锚点引用全挂。
+- **2026-10-25 决策**：**保留 YAML**，因为它要同时服务“简单安全组”和“复杂安全组”两套配置；不盲目换格式。后续仍应引入 `pyyaml`/`js-yaml`（或自写但更完整的解析）以支持 flow/anchors，但要和配置签名/审计链一起设计；G 随 A 解决。当前先保证默认配置和简单组可用，不阻塞发布工程。
+
+**B. `execve` 子进程环境继承（安全洞）（Linux 已修复；macOS 基线已跑通，新增路径待回归）**
+- **问题**：`execve`/`execv`/`execvp` 的 wrapper 只检查 `pathname`，没把 VPO 环境变量注入子进程 `envp`。已实测 `os.execve(..., {})` 和 `subprocess.Popen(..., env={})` 都能让子进程读到真实 `/etc/passwd`。
+- **修法**：在 `signatures.json` 用 `env_mode` 标注：`execve`/`posix_spawn`/`posix_spawnp` 为 `replace`（构造新 envp），`execv`/`execvp`/`system`/`popen` 为 `reinject`（写回 environ）；两个生成器在通用 wrapper 里插入注入代码，并调用 `policy.c` 的 `vpo_envp_merge`/`vpo_reinject_environ`。
+- **补充（2026-10-25）**：
+  - 必须同时覆盖 `posix_spawn`/`posix_spawnp`，否则 Python `subprocess.Popen(env={})` 仍会绕过。
+  - 注入值必须来自 constructor 时缓存的策略，不能在 `execve` 时读 `getenv`；guest 可以先 `unsetenv('VPO_DENY_PATHS')` 再 exec。
+  - 生成代码要保证 Linux/macOS 都能编译运行：用 `__linux__`/`__APPLE__` 平台宏，Linux 注入 `LD_PRELOAD`，macOS 注入 `DYLD_INSERT_LIBRARIES`；`-ldl` 只在 Linux 加。
+  - 处理 `envp == NULL`、分配失败（直接拒绝）、`LD_PRELOAD` 合并去重、`PYTHONPATH`/`NODE_OPTIONS` 注入 VPO 前缀而不是整体覆盖。
+  - 详见 6.1。
+
+**C. `resolve_executable` 的 shim 检测误伤 pyenv 真实二进制（已修复）**
+- **问题**：`SHIM_MARKERS = ('/shims/', '/.pyenv/', ...)` 用 `in` 判断，会跳过 `~/.pyenv/versions/3.11/bin/python3`（真实二进制），不只跳过 `~/.pyenv/shims/python3`。
+- **修法**：marker 改成精确前缀（`/.pyenv/shims/`、`/.nvm/versions/*/bin/`），或检测文件是否是 shell script（读前几字节 `#!/`），是 script 跳过，是 ELF/Mach-O 就用。
+
+**D. `parse_audit` 的 `lang is None` 静默（已修复）**
+- **问题**：`lang` 为 `None` 时 `s.startswith(f"{lang}:")` 变成 `startswith("None:")`，永远不匹配，`audit_classes` 空，静默不审计。
+- **修法**：解析时 `lang is None` 不匹配任何语言；`cmd_run` 在 `audit enabled` 但目标不是 Python/Node 时打印警告，不再静默。
+
+**E. `sitecustomize.py` 审计 hook 重入（已修复）**
+- **问题**：`cls.__init__` 被重复包装时，`orig` 变成上一次 wrapper，调用链嵌套、日志重复。
+- **修法**：包装前检查 `getattr(cls.__init__, "__vpo_audited__", False)`，打标记防重入；配置类去重。JS `installAudit` 同步加标记/去重，并用 `Reflect.construct(target, args, newTarget)` 保留 `newTarget`。
+
+**F. `buildHook`（JS 版）不检查 `spawnSync` 退出码（已修复）**
+- **问题**：`gen_wrappers.js` 或编译失败时，`buildHook` 继续往下走，`cmdInit` 打印“自检失败”但退出码 0，CI 误判成功。
+- **修法**：检查 `spawnSync(...).status`，非零则 `process.exit(1)`。Python 版用 `check=True` 是对的，保持。
+
+**G. `parse_honeypot_map` 的冒号分割**
+- **问题**：`partition(":")` / `indexOf(':')` 找第一个冒号，路径含冒号会截错。
+- **修法**：pyyaml 重构（A）一并解决。
+
+**H. `normalizeType` 的 `[]` 替换不一致（已修复）**
+- **问题**：`gen_wrappers.js` 的 `t.replace('[]', '*')` 只替换第一个（JS `String.replace(string, string)` 语义），Python 的 `str.replace` 替换全部。双 `[]` 类型时两版输出不一致，违反“两个生成器输出必须完全相同”的注释。
+- **修法**：JS 用 `t.replaceAll('[]', '*')` 或 `t.split('[]').join('*')`。
+
+**V. 审计 `enabled` 误判（新增，P0，已修复）**
+- **问题**：`parse_audit` 用 `enabled = "true" in s.lower()` 检查整行，默认配置 `enabled: false  # ... 设为 true 才启用` 里的注释包含 `true`，导致 `enabled` 被误判为真，`audit.log` 持续写入。
+- **复现**：`vpo_hook.parse_audit("audit:\n  enabled: false # true\n", "python")` 返回 `True`。
+- **修法**：先去掉行内注释，再判断值：`value = s.split(":", 1)[1].split("#", 1)[0].strip().lower()`，只接受 `true/yes/on/1`。JS 版 `parseAudit` 的 `includes('true')` 一并修。
+
+**W. 验收脚本与可静默日志（新增，P0/P1，已实现）**
+- **问题**：`vpo-hook run` 的诊断信息走 stdout，`honeypot.py`/`honeypot.js` 也打印到 stdout，污染目标程序输出；目前没有自动化验收脚本，回归靠手敲。
+- **修法**：`run` 诊断统一走 stderr；加 `-q/--quiet`、`-v/--verbose` 和 `VPO_HOOK_QUIET`/`VPO_HOOK_VERBOSE`；`honeypot` 支持静默；新增 `scripts/verify_linux.sh`（macOS 可复用）输出完整日志。详见 6.3。
+
+### P1（下一阶段）
+
+**I. `policy.c` 的 `rewrite_for` 隐式契约**
+- **问题**：`action->rewrite` 指向 `__thread buf`，调用方须在下一个 `vpo_check` 前用完。当前安全，但 wrapper 生成逻辑改动会破。
+- **修法**：改成 `rewrite_for(path, out_buf, out_len)` 调用方传 buffer，消灭隐式契约。或至少在 `vpo_hook.h` 注释这个约定。
+
+**J. `network_mode` 三态配置**（见“应该做”第 1 条）。
+- 默认值不单独拍板：跟随**简单安全组**的最终设计。简单组应按“手机权限”思路给安全默认；复杂组再暴露 allowlist/denylist/off。
+
+**K. `signatures.json` 加 `skip_on`/`noop` 标记**
+- **问题**：Linux 侧 `close`/`mmap` 等函数生成空 wrapper（`vpo_check` 直接放行），高频调用白白增加 `dlsym` + 空转开销。
+- **修法**：`signatures.json` 加 `"skip_on": ["linux"]` 或 `"noop": true`，生成器据此跳过。
+
+**L. 审计日志并发安全（已修复）**
+- **问题**：`sitecustomize.py` 用 `open(..., "a")` + `f.write`，多线程下 `json.dumps` + `write` 非单次系统调用，可能交错。
+- **修法**：Python 用 `os.open(..., O_APPEND)` + `os.write` 单次/循环写完再 `close`；JS 用 `fs.openSync` + `fs.writeSync` 一次写。已实现，日志权限 `0600`。
+
+**M. `interpose.js` 的 `installLoader` 的 `isMain` 放行洞**
+- **问题**：注释自认“guest could call `Module._load(..., true)`”。这是**功能上的绕过路径**。
+- **修法**：不要当成安全边界，文档写清楚。或者用 `require.main === module` 的启发式收紧（不完美但提高门槛）。
+
+**N. `installAudit` 的 `Reflect.construct(target, args)` 丢 `newTarget`**
+- **问题**：`new.target` 在 constructor 里是 `target` 不是 proxy，但 `instanceof proxy` 仍为 true（proxy 的 prototype 是 target 的 prototype），行为正确。记录为“设计正确，无需修”。
+
+**X. 跨运行时支持调研（Bun / C 扩展 / 其他，新增，P1/P2）**
+- **背景**：原本只面向 Python 和 Node，但用户已安装 Bun，并指出直接 C 扩展（`.so`）和其他运行时也可能需要覆盖。
+- **原则**：二进制 hook 是最终兜底，所有动态链接进程（Bun、C 扩展、native 模块）都应被 `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` 覆盖；名文 hook 仍只承诺 Python/JS。
+- **待验证**：
+  - 用 Bun 跑同一套文件/网络/写标记测试，确认二进制 hook 生效。
+  - Bun 的名文 hook 需要单独的 preload 机制（Bun 支持 `--preload`，但 `NODE_OPTIONS=--require` 不保证兼容），先调研再承诺。
+  - 写一个最小 C 扩展（调用 `open64`/`fopen64`），分别加载进 Python 和 Node，确认二进制 hook 仍返回蜜罐。
+  - 其他运行时（PyPy、Deno 等）只做调研，不在本期承诺。
+- 详见 6.4。
+
+### P2（产品化/发布）
+
+**O. 发布版缺预编译库**
+- 当前 `init` 用本机 clang 编译，普通人没装 clang 就用不了。发布版应带 macOS arm64/x86_64、Linux x64/arm64 的预编译 `libvpo_hook.dylib/.so`；`init` 默认本机编译（用户要求，避免 libc 不匹配），无编译器或编译失败时才 fallback 到预编译库。生成方案见 6.2。
+
+**P. `package.json` 缺 `files` 字段**
+- npm publish 默认带所有非 `.gitignore` 文件，`py_plaintext/` 是否被发布依赖默认行为。必须显式声明 `"files": ["vpo_hook.js", "obj_hook/", "plaintext/", "py_plaintext/"]`，排除 `wrapper.c`、`libvpo_hook.so`、`__pycache__/`。
+
+**Q. `setup.py` 的 `package_data` glob 风险**
+- `obj_hook/*` 可能匹配 `__pycache__/` 和用户编译产物。改用 `MANIFEST.in` 精确列出，或 `package_data` 精确到文件名。
+
+**R. `python_requires=">=3.8"` 脆弱兼容**
+- `str | None` 注解在 `from __future__ import annotations` 下当前 work，但函数体内用 `|` 会崩。改 `>=3.10` 或确保所有 `|` 只在注解位置。
+
+**S. `setup.py` 缺 `zip_safe=False`**
+- 防御性写法，声明“不能在 zip 里运行”。
+
+**T. `build_hook` 编译失败抛裸 traceback**
+- 捕获 `CalledProcessError`，打印友好错误（“编译失败，请检查 clang/gcc 是否安装”），退出码非零。
+
+**U. `js_plaintext/preload.js`/`py_plaintext/sitecustomize.py` 存在性无检查**
+- 打包漏了时，Node/Python 目标直接崩。启动器里加 `if not preload.exists(): 报错退出`。
+
+### P3（未来/待设计，先记录不实现）
+
+**Y. 双语运维 SDK（`import vpoh` / `require('vpoh')`）**
+- **需求**：运维脚本需要 Python 和 JS 双语，并且两边都能直接导入 `vpoh` 调用，而不是只能走 CLI。
+- **范围**：`init`、`status`、`verify`、读/写配置、能力发现、生成示例、调用 run；两边 API 语义一致，输出 JSON 友好。
+- **暂不实现**，详见 6.5。
+
+**Z. Hook 发现与自动生成（运维脚本 + 示例）**
+- **需求**：通过运维脚本创建一个示例程序，运行后抓到“具体需要 hook 什么”（仅限 Python/JS），让用户勾选要启用的项，再自动生成签名/配置。
+- **边界**：C 扩展走二进制 hook，不做自动发现；自动生成结果必须人工确认，不能默认启用。
+- **暂不实现**，详见 6.6。
+
+**AA. 对象创建审计与供应链可审计增强**
+- **现状**：`VPO_AUDIT_CLASSES` 只记录 `{ts, class, stack}` 到明文 JSONL，不是供应链可审计证明。
+- **未来**：事件 schema、包身份/源码 hash、哈希链 + 签名、轮转/限流、隐私脱敏。
+- **明确不做**：不加密运行时对象；只对审计记录做签名/加密。详见 6.7。
+
+**AB. 配置完整性：签名优先于加密**
+- **需求**：用户希望配置配合本机密钥对做解密/防篡改。
+- **决策**：优先 Ed25519 签名；本地私钥对同 uid guest 不构成边界；加密只用于机密性，不用于防篡改。
+- **暂不实现**，详见 6.8。
+
+---
+
+## 四、发布脚本要求（给 AI 写 `scripts/release.py`）
+
+当前 `release/js/` 和 `release/py/` 是**手工同步的快照**，`obj_hook/`、`plaintext/`、`js_plaintext`/`py_plaintext` 各有 2-3 处副本，改一个 bug 要改多处。**必须写一个发布脚本消除 drift**。
+
+### 脚本职责
+
+`scripts/release.py`（Python 写，跨平台）：
+
+1. **从源目录构建发布版**：
+   - 源：`py/`、`js/`
+   - 目标：`release/py/vpohook/`、`release/js/`
+   - 规则：
+     - `py/vpo_hook.py` → `release/py/vpohook/cli.py`（改名）
+     - `py/obj_hook/*` → `release/py/vpohook/obj_hook/*`
+     - `py/plaintext/*` → `release/py/vpohook/plaintext/*`
+     - `js/plaintext/*` → `release/py/vpohook/js_plaintext/*`
+     - `js/vpo_hook.js` → `release/js/vpo_hook.js`
+     - `js/obj_hook/*` → `release/js/obj_hook/*`
+     - `js/plaintext/*` → `release/js/plaintext/*`
+     - `py/plaintext/*` → `release/js/py_plaintext/*`
+   - **路径替换**：源版 `py/vpo_hook.py` 里 `preload = HERE.parent / "js" / "plaintext" / "preload.js"` 要替换成 `HERE / "js_plaintext" / "preload.js"`；源版 `js/vpo_hook.js` 里 `PY_PLAINTEXT = path.join(path.dirname(HERE), 'py', 'plaintext')` 要替换成 `path.join(HERE, 'py_plaintext')`。替换规则用**精确字符串匹配 + 断言**，不要正则模糊替换。
+
+2. **排除规则**：
+   - 不拷 `__pycache__/`、`*.pyc`、`*.pyo`、`.DS_Store`、`node_modules/`、`wrapper.c`、`libvpo_hook.dylib`、`libvpo_hook.so`、`*.egg-info/`、`dist/`、`build/`。
+   - **断言**：拷贝后检查 `release/py/vpohook/plaintext/` 和 `release/js/py_plaintext/` 下没有 `__pycache__/`，有则报错退出。
+
+3. **一致性校验**：
+   - `release/js/obj_hook/policy.c` 和 `release/py/vpohook/obj_hook/policy.c` 必须**逐字节相同**，不同则报错。
+   - `signatures.json`、`vpo_hook.h`、`config.yaml`、`honeypot.py`/`honeypot.js` 同理。
+   - `release/js/plaintext/interpose.js` 和 `release/py/vpohook/js_plaintext/interpose.js` 必须相同。
+   - `release/js/py_plaintext/sitecustomize.py` 和 `release/py/vpohook/plaintext/sitecustomize.py` 必须相同。
+   - **断言失败时打印 diff 并退出非零**。
+
+4. **版本号同步**：
+   - `package.json` 的 `version` 和 `setup.py` 的 `version` 必须一致。
+   - 从单一源（比如 `VERSION` 文件或 `py/pyproject.toml`）读版本号，写入两处。
+
+5. **干跑模式**：
+   - `python scripts/release.py --dry-run` 只打印“会拷哪些文件、会做哪些替换”，不实际写。
+   - `python scripts/release.py` 实际执行。
+   - `python scripts/release.py --check` 只做一致性校验，不拷贝（CI 用）。
+
+6. **输出清单**：
+   - 执行完打印“拷了 N 个文件，替换了 M 处路径，一致性校验通过”。
+   - 失败时打印“第 X 步失败：<原因>”。
+
+### 脚本不做什么
+
+- 不跑 `npm publish` / `pip upload`，只准备 `release/` 目录。
+- 不编译 C 库（预编译是单独的 CI 任务，在旧版 glibc 容器里跑）。
+- 不跑测试（测试是 `scripts/test.sh` 的职责）。
+
+### CI 集成建议（给 AI 参考，不强制）
+
+- GitHub Actions 里加一个 job：`python scripts/release.py --check`，确保每次 PR 的 `release/` 和源目录一致，drift 时报错。
+- 发布 job：`python scripts/release.py` → 编译预编译库 → `cd release/js && npm publish` → `cd release/py && python setup.py sdist bdist_wheel && twine upload dist/*`。
+
+---
+
+## 五、给 AI 的工作顺序建议（2026-10-25 更新）
+
+1. **P0-B：`execve` + `posix_spawn`/`posix_spawnp` 环境继承（Linux 已完成，macOS 生成通过、运行待实测）**。从 constructor 缓存构造 envp，不读运行时 `getenv`；生成代码用平台宏保证 Linux/macOS 都能编译运行。`vfork` 改为 `fork`，避免 vfork 子进程 malloc 崩溃。
+2. **小 P0 一批（已修复）**：D（`lang=None` 显式化 + 警告）、E（审计防重入）、V（审计 `enabled` 误判）、L（审计写入原子性）、F（buildHook 退出码）。
+3. **W：验收脚本 + quiet/log 控制（已实现）**：`scripts/verify_linux.sh` + `run -q/-v`，诊断信息走 stderr。
+4. **`scripts/release.py`**：消除 `release/` 手工同步；跑通 `--check`。
+5. **YAML（A/G）与配置完整性（AB）**：按用户节奏推进；先定威胁模型，签名优先于加密，不要阻塞上面几步。
+6. **P1/P2/P3**：X（Bun/C 扩展）、J（network_mode 三态）、K（skip_on/noop）、O（预编译库）、P/Q（打包）、Y/Z/AA（双语 SDK、Hook 发现、供应链审计）。
+
+**不要跳步**。不要先做“弹窗”“AI 生成配置”“策略包签名”这些上层功能，因为底层 bug 没修时，上层功能会建立在不可靠的基础上。**先让当前代码“对”，再让它“好用”**。
+
+---
+
+## 六、2026-10-25 新增需求与设计记录
+
+### 6.1 P0-B 跨平台与防清空要求
+
+- **状态（2026-10-25）**：Linux 已实现并实测通过；macOS 生成器输出通过（与 Python 版逐字节一致）。macOS 基线（交接前的 17 个 wrapper）已在 macOS 实机跑通；本次新增的 `posix_spawn`/env 注入/`vfork -> fork`/审计改动仍需在 macOS 上做一次回归。
+- **目标**：`execve`/`posix_spawn` 的环境注入在 Linux 和 macOS 都能工作，且 guest 不能通过 `unsetenv` 清掉策略。
+- **平台宏**：
+  - `#if defined(__linux__)` → 注入 `LD_PRELOAD`
+  - `#elif defined(__APPLE__)` → 注入 `DYLD_INSERT_LIBRARIES`
+  - `-ldl` 只在 Linux 链接；macOS 的 `dlsym` 在 libSystem 里。
+- **缓存**：`policy.c` constructor 启动时缓存 `deny_paths`、`allow_network`、`risk_markers`、`rewrite_paths`，以及 `VPO_HOOK_CONFIG`、`VPO_HOOK_PY_API`、`VPO_HOOK_JS_API`、`VPO_AUDIT_*`、`VPO_PYTHONPATH`、`VPO_NODE_OPTIONS`、`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES`。`execve` wrapper 只读缓存。
+- **envp 规则**：
+  - `envp == NULL` 按空环境处理。
+  - 复制原 envp 的非 VPO 键；VPO 键用缓存值覆盖。
+  - `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` 合并并去重，VPO 库优先。
+  - `PYTHONPATH`/`NODE_OPTIONS` 追加 VPO 前缀，不整体覆盖用户值。
+  - `malloc` 失败直接返回失败，不 fallback 到原 envp。
+- **vfork**：`vfork` wrapper 改为调用 `fork()`。vfork 子进程里调用 `malloc`/`strdup` 是未定义行为，会触发 `*** stack smashing detected ***`；替换为 fork 后再做 envp 合并才是安全的。
+- **覆盖函数**：`execve`、`execv`、`execvp`、`posix_spawn`、`posix_spawnp`（`replace`/`reinject`）；`system`、`popen`（`reinject`）；`execveat` 可选后续补。
+- **macOS 限制**：`execv`/`execvp`/`system`/`popen` 仍在 `MACOS_SKIP`（没有安全的真实符号）。这些是 macOS 上已确认无法安全 interpose 的缺口，作为**接受边界**记录，不再当作待修 TODO；`execve`/`posix_spawn`/`posix_spawnp` 已生成，需在 macOS 上回归。
+- **验收**：`os.execve(..., {})`、`Popen(env={})`、`os.posix_spawn`、`env -i`、`sh -c` 子进程读 `/etc/passwd` 都必须是蜜罐；`env` 里能看到 `VPO_HOOK_CONFIG`。
+- **边界**：直接 raw `syscall(SYS_execve)` 仍可绕过，需在文档写清楚；彻底封死要 seccomp/ptrace，不在本期。
+
+### 6.2 预编译库生成（P2-O）
+
+用户本机是较新的 Linux，**不要用本机生成发布用 `.so`**，否则 `GLIBC_2.xx` 符号版本太新。推荐：
+
+- **Linux x86_64**：用旧 glibc 容器编译，例如 `quay.io/pypa/manylinux2014_x86_64`（glibc 2.17）或 `ubuntu:18.04`（glibc 2.27）。预编译前先按目标平台生成 `wrapper.c`（`-p linux` / `-p darwin`）。
+  ```bash
+  docker run --rm -v "$PWD:/src" -w /src quay.io/pypa/manylinux2014_x86_64 \
+    bash -lc 'gcc -shared -fPIC -O2 -o prebuilt/linux-x86_64/libvpo_hook.so \
+      py/obj_hook/wrapper.c py/obj_hook/policy.c -ldl'
+  ```
+- **Linux arm64**：原生 arm64 runner，或 `docker run --platform linux/arm64`（需 QEMU），或用 `aarch64-linux-gnu-gcc` + sysroot 交叉编译。
+- **无 Docker 的替代**：`zig cc -target x86_64-linux-gnu.2.17` 可直接生成旧 glibc ABI 的 `.so`；也可以维护一个旧版 sysroot 做交叉编译。生成后仍要验证符号版本。
+- **macOS**：GitHub Actions 的 macOS runner 分别构建 arm64/x86_64；需要 universal 时用 `clang -dynamiclib -arch arm64 -arch x86_64`，并在两种架构上各测一次。
+- **验证**：
+  - `readelf --version-info` / `objdump -T` 检查最高 `GLIBC_*` 符号版本不超过目标。
+  - 在旧容器里 `LD_PRELOAD=... /bin/true` 能加载。
+  - `nm -D` 确认 `open64/openat64/fopen/fopen64` 等符号存在。
+- **目录**：`prebuilt/linux-x86_64/`、`linux-aarch64/`、`darwin-arm64/`、`darwin-x86_64/`。
+- **策略**：`init` 默认本机编译（用户要求，避免 libc 不匹配）；本机无编译器或编译失败时，才用预编译库兜底。预编译库要校验 hash/签名。
+- **本机新 Linux 的定位**：只用于本地开发和本机编译，不用于生成发布产物。
+
+### 6.3 验收脚本与日志控制（W）
+
+- **状态（2026-10-25）**：已实现 `scripts/verify_linux.sh`，Linux x86_64 跑通（当前 44 项 PASS / 0 FAIL）。
+- **脚本**：`scripts/verify_linux.sh`（macOS 可复用或加 `verify_macos.sh`），`set -uo pipefail`（失败继续跑，最后汇总）。
+- **完整日志**：
+  - `LOG="logs/verify-$(date +%Y%m%d-%H%M%S).log"`
+  - 用 `exec > >(tee -a "$LOG") 2>&1` 或每个 `run_case` 同时写 log。
+  - 记录环境：`uname -a`、`python3 -V`、`node -v`、`bun --version`、`cc --version`、`nm -D` 符号、生成器数量、配置 hash。
+- **用例函数**：`run_case "名称" "命令" "期望"`，记录命令、期望、实际、PASS/FAIL；失败继续跑，最后汇总并非零退出。
+- **清理**：`trap` 关闭后台 CVE server、删除临时文件；所有 server 用 `timeout`。
+- **日志静默**：
+  - `vpo-hook run` 的诊断全部走 **stderr**，目标程序 stdout 保持干净。
+  - 加 `-q/--quiet`、`-v/--verbose`；环境变量 `VPO_HOOK_QUIET=1`、`VPO_HOOK_VERBOSE=1`。
+  - `honeypot.py`/`honeypot.js` 支持 `--quiet`，或 quiet 模式下 launcher 重定向其 stdout。
+  - C 库以后加日志也走 stderr，由 `VPO_VERBOSE` 控制。
+  - 测试脚本默认 `-q`，完整细节进 log；调试时 `-v`。
+- **不要**在 log 里打印真实 token、密码、私钥。
+
+### 6.4 跨运行时与 C 扩展（X）
+
+- **二进制 hook 是兜底**：Bun、Python/Node 的 C 扩展、其他动态链接 native 模块，只要走 libc，就应被覆盖。
+- **Bun**：
+  - 用户判断：Bun 的 obj 也是 JS 对象，明文 hook 原则上应能复用；先测 Bun 是否支持现有 `preload.js`（`--preload` / `BUN_OPTIONS` / `NODE_OPTIONS` 的实际效果），能复用就不单独写一套。
+  - 如果 Bun 的模块加载/代理语义不同，再补 Bun 适配；不要先假设一定需要新实现。
+  - 先验证二进制 hook 对 Bun 的 `fs`/`child_process`/`net` 出口是否生效。
+- **C 扩展**：
+  - 写一个最小 `.so`，调用 `open64`/`fopen64`，分别加载进 Python 和 Node，确认蜜罐。
+  - C 扩展不需要名文 hook；二进制 hook 已覆盖。
+- **其他运行时**：PyPy、Deno、GraalPy 等只保证 libc 出口 hook；不承诺名文 hook。
+- **libc 绕过**：直接 raw `syscall` / 静态链接 / 主动反检测不在 LD_PRELOAD 能解决的范围内。当前先接受这个边界；如果简单安全组需要更强保证，后续评估 Linux Landlock + seccomp、macOS App Sandbox 作为第二层，而不是继续在 LD_PRELOAD 上叠补丁。
+
+### 6.5 双语运维 SDK（Y）
+
+- **目标**：Python 和 JS 运维脚本都能直接导入并调用，不只依赖 CLI。
+- **Python**：`import vpoh`，提供 `init()`、`status()`、`verify()`、`load_config()`、`save_config()`、`run()`、`discover()`。
+- **JS**：`require('vpoh')` / `import vpoh`，提供同名/同语义 API。
+- **要求**：
+  - 两边返回结构一致，便于脚本处理。
+  - 不要求两边互相调用；共享同一份配置和生成器。
+  - 运维脚本可以用任一语言写，能力对等。
+- **暂不实现**，先记录 API 形态。
+
+### 6.6 Hook 发现与自动生成（Z）
+
+- **流程**：
+  1. 运维脚本创建一个示例 Python/JS 程序。
+  2. 在 observe 模式下运行：记录实际调用的 libc 函数和名文 API。
+  3. 输出候选 hook 列表（函数/类、调用次数、调用栈）。
+  4. 用户选择要启用的项。
+  5. 自动生成 `signatures.json` 条目、wrapper 和配置片段。
+- **实现思路**：
+  - libc 调用：`strace`/`ltrace`，或给 hook 库加 observe 模式（只记录不拦截）。
+  - Python：`sys.audit`、`sys.settrace`、AST 扫描。
+  - JS：`diagnostics_channel`、`async_hooks`、AST 扫描。
+- **边界**：仅限 Python/JS；C 扩展走二进制 hook；自动生成结果必须人工确认，不能默认启用。
+
+### 6.7 对象审计与供应链可审计（AA，暂不做）
+
+- **现状**：`VPO_AUDIT_CLASSES` 包装 Python `__init__` / JS constructor，记录 `{ts, class, stack}` 到明文 JSONL；没有包身份、签名、哈希链。
+- **不建议加密运行时对象**：对象通常不可序列化，guest 需要明文使用，同进程加密没有意义。
+- **未来方向**：
+  - 事件 schema：`schema_version`、`pid`、`ppid`、`exe`、`class`、`stack`、`module`、`module_hash`、`ts`。
+  - 完整性：哈希链 + Ed25519 签名 + 可选可信时间戳。
+  - 供应链：包名/版本/源码 hash/SBOM，与对象审计解耦。
+  - 运维：轮转、大小上限、采样/限流、隐私脱敏。
+- **威胁模型**：同 uid guest 可读日志、可改日志；签名能发现篡改，但不能阻止同 uid 攻击者删除整份日志。需要外部存储/特权守护进程才更强。
+
+### 6.8 配置完整性：签名优先于加密（AB，设计已定，待实现）
+
+- **三个问题分开**：解析（YAML）、完整性（防篡改）、机密性（防读取）。
+- **核心结论**：本机私钥如果 launcher 能自动用，同 uid 的 guest 也能用；因此本地密钥对加密/签名**不能防恶意 guest 篡改**。
+- **已敲定（2026-10-25）**：
+  - 用 **Ed25519** 做快速签名（验证成本低，适合每次启动校验），不要自创弱哈希/HMAC 方案。
+  - 签名内容：`version + config_hash + timestamp + nonce + prev_audit_hash`；配合审计链，保证配置和审计记录的一致性。
+  - 通过短有效期/定期轮换/审计链防止重放；不要依赖“把 key 藏在 blob 里”这种可提取的混淆。
+  - launcher 内置公钥；私钥只在发布侧/签名服务，不能随包分发。
+  - 用户可编辑配置用“厂商签名默认配置 + 用户本地覆盖配置”两层；用户层可放 OS keyring。
+  - 如果确实要加密：用 `age`/`libsodium sealed box`，私钥放 OS keyring/TPM，解密到 `memfd`/管道，不落盘明文；加密只解决机密性，不解决完整性。
+  - YAML 保持给用户编辑；签名对原始字节或规范化后的 canonical 数据做。YAML 重构可以独立进行，先加 `version`/`signature` 字段。
+- **注意**：配置最终展开成 `VPO_*` 环境变量，对 guest 可见；所以“防篡改”可以，“防读取”在同进程模型下做不到。
+
+### 6.9 安全组分层与配置保护（2026-10-25 决策）
+
+- **两套安全组是刻意设计**，不是过渡状态：
+  - **简单安全组**：面向普通用户，类似手机权限；只暴露少量能力组（IO/网络/进程/敏感路径），默认值安全，配置项尽量少，不开放任意 API hook。
+  - **复杂安全组**：面向技术人/运维，开放全部权限、运维脚本、自定义 API hook、Hook 发现和自动生成。必须显式切换到复杂组，并显示高危警告。
+- **简单组的路线**：先定“普通用户能理解”的能力组和默认拒绝项；网络默认值（J）跟随简单组一起定，不先拍板。
+- **复杂组的 API hook**：不要假设“能 hook 的 API 都有用”。先用 Z（发现/示例/observe）验证真实使用频率和风险，再决定默认开启哪些；自动生成的 hook 必须人工确认。
+- **配置保护**：
+  - `~/.vpo-hook` 目录 `0700`，`config.yaml`/审计日志 `0600`。
+  - launcher 启动时读一次配置并展开成环境变量；运行中改文件不影响当前进程，下次启动由签名/审计校验发现。
+  - 防“其他文件/进程修改配置”：文件权限 + 签名 + 审计链 + 可选只读/immutable（`chattr +i` 需 root，不能作为唯一手段）。
+  - 同 uid 的恶意 guest 仍是边界：它能读配置/环境变量；签名防的是篡改和重放，不是同进程读取。
+  - 不把“进程逃逸已被拦”当成配置保护的全部理由；配置保护要独立成立。
+- **供应链/作用域**：用户提出的“以信源为 query、限制信息进入作用域、hook obj/namespace constructor”属于后续 P1/P3 设计，先记录，不阻塞简单组和发布工程。
+
+---

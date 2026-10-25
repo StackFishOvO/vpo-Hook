@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# VPO generated/build artifacts
+wrapper.c
+libvpo_hook.so
+libvpo_hook.dylib
+*.o
+*.a
+
+# Test build artifacts
+test/**/build/
+test/**/.venv/
+test/**/*.so
+test/**/*.dylib
+
+# Runtime/test outputs
+logs/
+*.log
+*.pkl
+example/malicious.pkl
+
+# Generated test certificates/keys
+test/cve-2026-106069/key.pem
+test/cve-2026-106069/cert.pem
+*.key
+
+# Editor/OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local secrets
+.env
+.env.*
+!.env.example

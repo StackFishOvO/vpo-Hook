@@ -1,0 +1,12 @@
+{
+  "name": "vpo-hook",
+  "version": "0.1.0",
+  "description": "VPO-Hook: Virtual Private Object Hook — 二进制 + 名文双层纵深防御",
+  "bin": {
+    "vpo-hook": "vpo_hook.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=14"
+  }
+}

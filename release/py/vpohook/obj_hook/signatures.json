@@ -1,0 +1,302 @@
+{
+  "$schema": "https://example.invalid/vpo-hook/signatures.schema.json",
+  "version": 1,
+  "description": "VPO-Hook 二进制 hook 签名模板表。每个函数描述 libc 出口函数的签名、类别与参数检查方式。gen_wrappers.py 读取本表生成 wrapper.c。",
+  "functions": {
+    "open": {
+      "signature": "int open(const char *pathname, int flags, ...)",
+      "category": "io",
+      "variadic_mode": "O_CREAT",
+      "linux_aliases": ["open64"],
+      "args": [
+        { "name": "pathname", "type": "const char *", "check": "path" },
+        { "name": "flags", "type": "int" }
+      ]
+    },
+    "openat": {
+      "signature": "int openat(int dirfd, const char *pathname, int flags, ...)",
+      "category": "io",
+      "variadic_mode": "O_CREAT",
+      "linux_aliases": ["openat64"],
+      "args": [
+        { "name": "dirfd", "type": "int" },
+        { "name": "pathname", "type": "const char *", "check": "path" },
+        { "name": "flags", "type": "int" }
+      ]
+    },
+    "fopen": {
+      "signature": "FILE *fopen(const char *pathname, const char *mode)",
+      "category": "io",
+      "platforms": ["linux"],
+      "linux_aliases": ["fopen64"],
+      "args": [
+        { "name": "pathname", "type": "const char *", "check": "path" },
+        { "name": "mode", "type": "const char *" }
+      ]
+    },
+    "close": {
+      "signature": "int close(int fd)",
+      "category": "io",
+      "args": [
+        { "name": "fd", "type": "int" }
+      ]
+    },
+    "read": {
+      "signature": "ssize_t read(int fd, void *buf, size_t count)",
+      "category": "io",
+      "args": [
+        { "name": "fd", "type": "int" },
+        { "name": "buf", "type": "void *" },
+        { "name": "count", "type": "size_t" }
+      ]
+    },
+    "write": {
+      "signature": "ssize_t write(int fd, const void *buf, size_t count)",
+      "category": "io",
+      "args": [
+        { "name": "fd", "type": "int" },
+        { "name": "buf", "type": "const void *", "check": "buffer" },
+        { "name": "count", "type": "size_t" }
+      ]
+    },
+    "unlink": {
+      "signature": "int unlink(const char *pathname)",
+      "category": "io",
+      "args": [
+        { "name": "pathname", "type": "const char *", "check": "path" }
+      ]
+    },
+    "unlinkat": {
+      "signature": "int unlinkat(int dirfd, const char *pathname, int flags)",
+      "category": "io",
+      "args": [
+        { "name": "dirfd", "type": "int" },
+        { "name": "pathname", "type": "const char *", "check": "path" },
+        { "name": "flags", "type": "int" }
+      ]
+    },
+    "rename": {
+      "signature": "int rename(const char *oldpath, const char *newpath)",
+      "category": "io",
+      "args": [
+        { "name": "oldpath", "type": "const char *", "check": "path" },
+        { "name": "newpath", "type": "const char *", "check": "path" }
+      ]
+    },
+    "renameat": {
+      "signature": "int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath)",
+      "category": "io",
+      "args": [
+        { "name": "olddirfd", "type": "int" },
+        { "name": "oldpath", "type": "const char *", "check": "path" },
+        { "name": "newdirfd", "type": "int" },
+        { "name": "newpath", "type": "const char *", "check": "path" }
+      ]
+    },
+    "mkdir": {
+      "signature": "int mkdir(const char *pathname, mode_t mode)",
+      "category": "io",
+      "args": [
+        { "name": "pathname", "type": "const char *", "check": "path" },
+        { "name": "mode", "type": "mode_t" }
+      ]
+    },
+    "rmdir": {
+      "signature": "int rmdir(const char *pathname)",
+      "category": "io",
+      "args": [
+        { "name": "pathname", "type": "const char *", "check": "path" }
+      ]
+    },
+    "socket": {
+      "signature": "int socket(int domain, int type, int protocol)",
+      "category": "network",
+      "args": [
+        { "name": "domain", "type": "int" },
+        { "name": "type", "type": "int" },
+        { "name": "protocol", "type": "int" }
+      ]
+    },
+    "connect": {
+      "signature": "int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)",
+      "category": "network",
+      "args": [
+        { "name": "sockfd", "type": "int" },
+        { "name": "addr", "type": "const struct sockaddr *", "check": "sockaddr" },
+        { "name": "addrlen", "type": "socklen_t" }
+      ]
+    },
+    "bind": {
+      "signature": "int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)",
+      "category": "network",
+      "args": [
+        { "name": "sockfd", "type": "int" },
+        { "name": "addr", "type": "const struct sockaddr *", "check": "sockaddr" },
+        { "name": "addrlen", "type": "socklen_t" }
+      ]
+    },
+    "sendto": {
+      "signature": "ssize_t sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen)",
+      "category": "network",
+      "args": [
+        { "name": "sockfd", "type": "int" },
+        { "name": "buf", "type": "const void *", "check": "buffer" },
+        { "name": "len", "type": "size_t" },
+        { "name": "flags", "type": "int" },
+        { "name": "dest_addr", "type": "const struct sockaddr *", "check": "sockaddr" },
+        { "name": "addrlen", "type": "socklen_t" }
+      ]
+    },
+    "recvfrom": {
+      "signature": "ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen)",
+      "category": "network",
+      "args": [
+        { "name": "sockfd", "type": "int" },
+        { "name": "buf", "type": "void *" },
+        { "name": "len", "type": "size_t" },
+        { "name": "flags", "type": "int" },
+        { "name": "src_addr", "type": "struct sockaddr *", "check": "sockaddr" },
+        { "name": "addrlen", "type": "socklen_t *" }
+      ]
+    },
+    "send": {
+      "signature": "ssize_t send(int sockfd, const void *buf, size_t len, int flags)",
+      "category": "network",
+      "args": [
+        { "name": "sockfd", "type": "int" },
+        { "name": "buf", "type": "const void *", "check": "buffer" },
+        { "name": "len", "type": "size_t" },
+        { "name": "flags", "type": "int" }
+      ]
+    },
+    "recv": {
+      "signature": "ssize_t recv(int sockfd, void *buf, size_t len, int flags)",
+      "category": "network",
+      "args": [
+        { "name": "sockfd", "type": "int" },
+        { "name": "buf", "type": "void *" },
+        { "name": "len", "type": "size_t" },
+        { "name": "flags", "type": "int" }
+      ]
+    },
+    "fork": {
+      "signature": "pid_t fork(void)",
+      "category": "process",
+      "args": []
+    },
+    "vfork": {
+      "signature": "pid_t vfork(void)",
+      "category": "process",
+      "use_fork": true,
+      "args": []
+    },
+    "execve": {
+      "signature": "int execve(const char *pathname, char *const argv[], char *const envp[])",
+      "category": "process",
+      "env_mode": "replace",
+      "args": [
+        { "name": "pathname", "type": "const char *", "check": "path" },
+        { "name": "argv", "type": "char *const []" },
+        { "name": "envp", "type": "char *const []" }
+      ]
+    },
+    "execv": {
+      "signature": "int execv(const char *pathname, char *const argv[])",
+      "category": "process",
+      "env_mode": "reinject",
+      "args": [
+        { "name": "pathname", "type": "const char *", "check": "path" },
+        { "name": "argv", "type": "char *const []" }
+      ]
+    },
+    "execvp": {
+      "signature": "int execvp(const char *file, char *const argv[])",
+      "category": "process",
+      "env_mode": "reinject",
+      "args": [
+        { "name": "file", "type": "const char *", "check": "path" },
+        { "name": "argv", "type": "char *const []" }
+      ]
+    },
+    "posix_spawn": {
+      "signature": "int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *file_actions, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[])",
+      "category": "process",
+      "env_mode": "replace",
+      "args": [
+        { "name": "pid", "type": "pid_t *" },
+        { "name": "path", "type": "const char *", "check": "path" },
+        { "name": "file_actions", "type": "const posix_spawn_file_actions_t *" },
+        { "name": "attrp", "type": "const posix_spawnattr_t *" },
+        { "name": "argv", "type": "char *const []" },
+        { "name": "envp", "type": "char *const []" }
+      ]
+    },
+    "posix_spawnp": {
+      "signature": "int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *file_actions, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[])",
+      "category": "process",
+      "env_mode": "replace",
+      "args": [
+        { "name": "pid", "type": "pid_t *" },
+        { "name": "file", "type": "const char *", "check": "path" },
+        { "name": "file_actions", "type": "const posix_spawn_file_actions_t *" },
+        { "name": "attrp", "type": "const posix_spawnattr_t *" },
+        { "name": "argv", "type": "char *const []" },
+        { "name": "envp", "type": "char *const []" }
+      ]
+    },
+    "system": {
+      "signature": "int system(const char *command)",
+      "category": "process",
+      "env_mode": "reinject",
+      "args": [
+        { "name": "command", "type": "const char *", "check": "path" }
+      ]
+    },
+    "popen": {
+      "signature": "FILE *popen(const char *command, const char *type)",
+      "category": "process",
+      "env_mode": "reinject",
+      "args": [
+        { "name": "command", "type": "const char *", "check": "path" },
+        { "name": "type", "type": "const char *" }
+      ]
+    },
+    "kill": {
+      "signature": "int kill(pid_t pid, int sig)",
+      "category": "process",
+      "args": [
+        { "name": "pid", "type": "pid_t" },
+        { "name": "sig", "type": "int" }
+      ]
+    },
+    "mmap": {
+      "signature": "void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)",
+      "category": "mapping",
+      "args": [
+        { "name": "addr", "type": "void *" },
+        { "name": "length", "type": "size_t" },
+        { "name": "prot", "type": "int" },
+        { "name": "flags", "type": "int" },
+        { "name": "fd", "type": "int" },
+        { "name": "offset", "type": "off_t" }
+      ]
+    },
+    "mprotect": {
+      "signature": "int mprotect(void *addr, size_t len, int prot)",
+      "category": "mapping",
+      "args": [
+        { "name": "addr", "type": "void *" },
+        { "name": "len", "type": "size_t" },
+        { "name": "prot", "type": "int" }
+      ]
+    },
+    "dlopen": {
+      "signature": "void *dlopen(const char *filename, int flags)",
+      "category": "mapping",
+      "args": [
+        { "name": "filename", "type": "const char *", "check": "path" },
+        { "name": "flags", "type": "int" }
+      ]
+    }
+  }
+}
