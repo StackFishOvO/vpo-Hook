@@ -175,9 +175,9 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 
 ---
 
-## 四、发布脚本要求（给 AI 写 `scripts/release.py`）
+## 四、发布脚本（已实现 `scripts/release.py`）
 
-当前 `release/js/` 和 `release/py/` 是**手工同步的快照**，`obj_hook/`、`plaintext/`、`js_plaintext`/`py_plaintext` 各有 2-3 处副本，改一个 bug 要改多处。**必须写一个发布脚本消除 drift**。
+> 2026-10-25：已实现 `scripts/release.py`。`--check` 通过（22 个文件、2 处路径替换、`VERSION=0.1.0`）；实际构建会同步文件、删除 stale 产物、同步版本号并做一致性校验。以下保留原始要求作为验收标准。
 
 ### 脚本职责
 
@@ -239,7 +239,7 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 1. **P0-B：`execve` + `posix_spawn`/`posix_spawnp` 环境继承（Linux 已完成，macOS 生成通过、运行待实测）**。从 constructor 缓存构造 envp，不读运行时 `getenv`；生成代码用平台宏保证 Linux/macOS 都能编译运行。`vfork` 改为 `fork`，避免 vfork 子进程 malloc 崩溃。
 2. **小 P0 一批（已修复）**：D（`lang=None` 显式化 + 警告）、E（审计防重入）、V（审计 `enabled` 误判）、L（审计写入原子性）、F（buildHook 退出码）。
 3. **W：验收脚本 + quiet/log 控制（已实现）**：`scripts/verify_linux.sh` + `run -q/-v`，诊断信息走 stderr。
-4. **`scripts/release.py`**：消除 `release/` 手工同步；跑通 `--check`。
+4. **`scripts/release.py`（已实现）**：`--dry-run` / `--check` / 实际构建；`VERSION` 单一来源，`release/` 已可重复生成。
 5. **YAML（A/G）与配置完整性（AB）**：按用户节奏推进；先定威胁模型，签名优先于加密，不要阻塞上面几步。
 6. **P1/P2/P3**：X（Bun/C 扩展）、J（network_mode 三态）、K（skip_on/noop）、O（预编译库）、P/Q（打包）、Y/Z/AA（双语 SDK、Hook 发现、供应链审计）。
 

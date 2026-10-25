@@ -288,6 +288,12 @@ else
 fi
 
 section "release sync"
+out=$(python3 scripts/release.py --check 2>&1)
+rc=$?
+printf '%s\n' "$out"
+check_status "release.py --check exit" 0 "$rc"
+check_contains "release.py --check result" "release check: OK" "$out"
+
 diff_py=$(diff -rq py/obj_hook release/py/vpohook/obj_hook 2>&1 || true)
 printf '%s\n' "$diff_py"
 unexpected_py=$(printf '%s\n' "$diff_py" | grep -vE '^Only in py/obj_hook: (libvpo_hook\.(so|dylib)|wrapper\.c)$' | grep -v '^$' || true)
