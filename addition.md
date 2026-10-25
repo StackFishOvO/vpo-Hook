@@ -387,4 +387,72 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
   - 不把“进程逃逸已被拦”当成配置保护的全部理由；配置保护要独立成立。
 - **供应链/作用域**：用户提出的“以信源为 query、限制信息进入作用域、hook obj/namespace constructor”属于后续 P1/P3 设计，先记录，不阻塞简单组和发布工程。
 
+### 6.10 简单安全组设计定稿（2026-10-25）
+
+> **实现状态（阶段 A）**：已实现 env_root 作用域、网络三态、exec 模式。启用条件：`profile: simple` **且** 存在 `permissions` 块（旧配置 `profile: simple` 但没有 `permissions` 块时保持旧行为）。`policy.c` 已编译通过，`verify_linux.sh` 46/46 通过。
+
+**已敲定的四个点**：
+
+1. **Principal/作用域**：只保护“安装这个包的 venv / node 环境”。判定 env_root：
+   - Python：目标解释器所在 venv（有 `pyvenv.cfg`），否则 `sys.prefix`
+   - Node：从入口模块向上找最近的含 `package.json` + `node_modules` 的目录
+   - env_root 内是信任区，可读写；env_root 之外默认拒绝；系统运行时目录只读放行；敏感路径永远拒绝。
+2. **网络**：默认 `off`；`internet` 允许公网 80/443 + DNS，阻止私网/link-local/云 metadata。**loopback 一视同仁**：不做隐式放行，和公网站点一样需要显式加入 allowlist（防 `curl http://localhost/...` 静默外泄）。`open` 仅复杂组。
+3. **进程**：`fork` 允许、`exec` 默认 `off`；`allowlist`/`shell` 需显式授权。
+4. **入站命中**：默认 `audit`（只记录），不默认 `block`。
+5. **信源**：第一版只做包级来源（包名/版本/hash/来源域名），对象级 taint 放复杂组。
+6. **配置编辑**：优先简单 CLI（`vpo-hook add/remove/list`），只在 CLI 难以表达大量 URL/文件时才上 TUI；TUI 只在配置时运行，不影响 `run` 性能。
+7. **AI 审计**：保留 `policy.c` 的 `buffer_has_marker` 空位 + `VPO_AI_AUDIT` 接口，第一版不实现模型。
+
+**简单组 schema 定稿**：
+
+```yaml
+version: 1
+profile: simple
+name: "my-agent"
+env: auto            # auto | <env_root>
+
+permissions:
+  files:
+    extra_read: []
+    extra_write: []
+  network:
+    mode: off        # off | internet | allowlist
+    allowlist: []    # host:port
+    blocklist: []    # 可疑 URL/域名
+  process:
+    fork: true
+    exec: off        # off | allowlist | shell
+    exec_allow: []
+
+inbound:
+  inspect: true
+  action: audit      # audit | block
+
+sources:
+  allow: []
+  deny: []
+
+sensitive_words: []
+audit: on
+```
+
+**简单组编译出的环境变量（阶段 A）**：
+
+```text
+VPO_ENV_ROOT
+VPO_RUNTIME_DIRS
+VPO_NETWORK_MODE          off | internet | allowlist
+VPO_ALLOW_NETWORK         逗号分隔 host:port（allowlist 时）
+VPO_NETWORK_BLOCKLIST     逗号分隔 可疑 host/域名（internet 时拦截）
+VPO_EXEC_MODE             off | allowlist | shell
+VPO_EXEC_ALLOW            冒号分隔 可执行文件绝对路径
+VPO_DENY_PATHS            敏感路径（永远拒绝）
+VPO_HIGH_RISK_MARKERS     数据标记（password/token/secret/private key）
+VPO_INSPECT_INBOUND       1/0（recv/recvfrom 是否扫描）
+VPO_INBOUND_ACTION        audit | block
+```
+
+**实施方式（opt-in）**：只有 `profile: simple` 且带新字段时才启用 env_root 作用域/网络三态/exec 模式；没有 `profile` 的旧配置保持现有行为，不破坏现有测试。阶段 A 改动集中在 `py/vpo_hook.py`、`js/vpo_hook.js`、`py/obj_hook/policy.c`、`js/obj_hook/policy.c` 和两份 `config.yaml` 模板，生成器不动。
+
 ---

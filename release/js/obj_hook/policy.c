@@ -39,6 +39,19 @@ static char **risk_markers = NULL;    /* 数据高危标记 */
 static size_t risk_count = 0;
 static int loaded = 0;
 
+/* 简单安全组（profile: simple）运行时字段 */
+static char *env_root = NULL;         /* VPO_ENV_ROOT：信任区根目录 */
+static char **runtime_dirs = NULL;    /* VPO_RUNTIME_DIRS：系统只读目录 */
+static size_t runtime_count = 0;
+static char **extra_paths = NULL;     /* VPO_EXTRA_PATHS：额外授权路径 */
+static size_t extra_count = 0;
+static char **network_blocklist = NULL; /* VPO_NETWORK_BLOCKLIST：可疑 host/ip */
+static size_t blocklist_count = 0;
+static char **exec_allow = NULL;      /* VPO_EXEC_ALLOW：可执行文件 */
+static size_t exec_allow_count = 0;
+static int network_mode = -1;         /* -1 旧行为, 0 off, 1 internet, 2 allowlist */
+static int exec_mode = -1;            /* -1 旧行为, 0 off, 1 allowlist, 2 shell */
+
 /* ---------------------------------------------------------------------------
  * P0-B：constructor 时缓存原始环境变量。
  *
@@ -302,6 +315,25 @@ static void load_policy(void) {
     parse_list(getenv("VPO_ALLOW_NETWORK"), &allow_network, &allow_count, ',');
     parse_list(getenv("VPO_HIGH_RISK_MARKERS"), &risk_markers, &risk_count, ':');
 
+    /* 简单安全组字段（无则保持旧行为） */
+    env_root = env_dup("VPO_ENV_ROOT");
+    parse_list(getenv("VPO_RUNTIME_DIRS"), &runtime_dirs, &runtime_count, ':');
+    parse_list(getenv("VPO_EXTRA_PATHS"), &extra_paths, &extra_count, ':');
+    parse_list(getenv("VPO_NETWORK_BLOCKLIST"), &network_blocklist, &blocklist_count, ',');
+    parse_list(getenv("VPO_EXEC_ALLOW"), &exec_allow, &exec_allow_count, ':');
+    const char *nm = getenv("VPO_NETWORK_MODE");
+    if (nm) {
+        if (strcmp(nm, "off") == 0) network_mode = 0;
+        else if (strcmp(nm, "internet") == 0) network_mode = 1;
+        else if (strcmp(nm, "allowlist") == 0) network_mode = 2;
+    }
+    const char *em = getenv("VPO_EXEC_MODE");
+    if (em) {
+        if (strcmp(em, "off") == 0) exec_mode = 0;
+        else if (strcmp(em, "allowlist") == 0) exec_mode = 1;
+        else if (strcmp(em, "shell") == 0) exec_mode = 2;
+    }
+
     /* rewrite 映射：deny=蜜罐，冒号分隔 */
     const char *raw_map = getenv("VPO_REWRITE_MAP");
     if (raw_map && *raw_map && deny_count > 0) {
@@ -363,24 +395,83 @@ static const char *rewrite_for(const char *path) {
 }
 
 /* ---------------------------------------------------------------------------
- * 网络地址检查（allow_network 白名单，第一版支持 IP:port）
+ * 网络地址检查
  * ------------------------------------------------------------------------- */
+static int ip4_private(unsigned a, unsigned b, unsigned c, unsigned d) {
+    if (a == 10) return 1;
+    if (a == 172 && b >= 16 && b <= 31) return 1;
+    if (a == 192 && b == 168) return 1;
+    if (a == 127) return 1;           /* loopback 一视同仁，不隐式放行 */
+    if (a == 169 && b == 254) return 1; /* 含云 metadata */
+    if (a == 0) return 1;
+    if (a == 100 && b >= 64 && b <= 127) return 1; /* CGNAT */
+    if (a >= 224) return 1;           /* 组播/保留 */
+    return 0;
+}
+
+static int host_is_private(const char *host) {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (sscanf(host, "%u.%u.%u.%u", &a, &b, &c, &d) == 4
+        && a <= 255 && b <= 255 && c <= 255 && d <= 255) {
+        return ip4_private(a, b, c, d);
+    }
+    if (strchr(host, ':')) {
+        if (strcmp(host, "::1") == 0) return 1;
+        if (strncmp(host, "fc", 2) == 0 || strncmp(host, "fd", 2) == 0) return 1;
+        if (strncmp(host, "fe8", 3) == 0 || strncmp(host, "fe9", 3) == 0
+            || strncmp(host, "fea", 3) == 0 || strncmp(host, "feb", 3) == 0) return 1;
+    }
+    return 0;
+}
+
+static int blocklisted(const char *host, const char *ip_port) {
+    for (size_t i = 0; i < blocklist_count; i++) {
+        const char *b = network_blocklist[i];
+        if (!b) continue;
+        if (strcmp(b, host) == 0) return 1;
+        if (ip_port && strcmp(b, ip_port) == 0) return 1;
+    }
+    return 0;
+}
+
 static int network_allowed(const struct sockaddr *addr, socklen_t addrlen) {
-    if (!addr) return 1;          /* 无地址，放行 */
-    if (allow_count == 0) return 1; /* 未配置白名单，放行 */
+    if (!addr) return 1;
+    /* 旧行为：没配置白名单就放行；简单安全组显式三态才收紧 */
+    if (network_mode == -1 && allow_count == 0) return 1;
 
     char host[NI_MAXHOST], serv[NI_MAXSERV];
     if (getnameinfo(addr, addrlen, host, sizeof(host), serv, sizeof(serv),
                     NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
-        return 1;                 /* 解析失败，放行 */
+        return network_mode == -1 ? 1 : 0;
     }
     char ip_port[NI_MAXHOST + NI_MAXSERV + 2];
     snprintf(ip_port, sizeof(ip_port), "%s:%s", host, serv);
 
-    for (size_t i = 0; i < allow_count; i++) {
-        if (allow_network[i] && strcmp(allow_network[i], ip_port) == 0) return 1;
+    if (network_mode == -1) { /* 旧行为：IP:port 白名单 */
+        for (size_t i = 0; i < allow_count; i++) {
+            if (allow_network[i] && strcmp(allow_network[i], ip_port) == 0) return 1;
+        }
+        return 0;
     }
-    return 0;                     /* 不在白名单 */
+
+    if (network_mode == 0) return 0; /* off */
+
+    if (blocklisted(host, ip_port)) return 0;
+
+    if (network_mode == 1) { /* internet：只放公网 80/443/53 */
+        if (host_is_private(host)) return 0;
+        if (strcmp(serv, "80") != 0 && strcmp(serv, "443") != 0
+            && strcmp(serv, "53") != 0) return 0;
+        return 1;
+    }
+
+    /* allowlist：IP:port 或 host 精确匹配 */
+    for (size_t i = 0; i < allow_count; i++) {
+        if (!allow_network[i]) continue;
+        if (strcmp(allow_network[i], ip_port) == 0) return 1;
+        if (strcmp(allow_network[i], host) == 0) return 1;
+    }
+    return 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -414,6 +505,52 @@ static int buffer_has_marker(const void *buf, size_t buflen) {
 /* ---------------------------------------------------------------------------
  * 入口
  * ------------------------------------------------------------------------- */
+static int is_exec_func(const char *func) {
+    static const char *const names[] = {
+        "execve", "execv", "execvp", "posix_spawn", "posix_spawnp", NULL
+    };
+    for (size_t i = 0; names[i]; i++) {
+        if (strcmp(func, names[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static int exec_allowed(const char *path) {
+    if (exec_mode == -1) return 1;
+    if (exec_mode == 2) return 1; /* shell */
+    if (exec_mode == 0) return 0; /* off */
+    if (!path || !*path) return 0;
+    for (size_t i = 0; i < exec_allow_count; i++) {
+        if (exec_allow[i] && strcmp(exec_allow[i], path) == 0) return 1;
+    }
+    return 0;
+}
+
+static int is_file_path_func(const char *func) {
+    static const char *const names[] = {
+        "open", "open64", "openat", "openat64", "fopen", "fopen64",
+        "unlink", "unlinkat", "rename", "renameat", "mkdir", "rmdir", "dlopen",
+        NULL
+    };
+    for (size_t i = 0; names[i]; i++) {
+        if (strcmp(func, names[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static int path_in_scope(const char *path) {
+    if (!env_root) return 1;
+    if (!path || !*path) return 1;
+    if (match_path(path, env_root)) return 1;
+    for (size_t i = 0; i < runtime_count; i++) {
+        if (runtime_dirs[i] && match_path(path, runtime_dirs[i])) return 1;
+    }
+    for (size_t i = 0; i < extra_count; i++) {
+        if (extra_paths[i] && match_path(path, extra_paths[i])) return 1;
+    }
+    return 0;
+}
+
 __attribute__((constructor))
 static void vpo_hook_constructor(void) {
     /* 在 guest 代码运行前缓存策略环境，防止后续 unsetenv 清空。 */
@@ -434,6 +571,14 @@ int vpo_check(const char *func, void *args, vpo_action *action) {
         if (rw) action->rewrite = rw;
     }
     if (a->path2 && path_blocked(a->path2)) {
+        action->allow = 0;
+    }
+    /* 简单安全组：文件路径限定在 env_root / runtime / extra 内 */
+    if (a->path && is_file_path_func(func) && !path_in_scope(a->path)) {
+        action->allow = 0;
+    }
+    /* 简单安全组：exec 模式 */
+    if (is_exec_func(func) && !exec_allowed(a->path)) {
         action->allow = 0;
     }
     /* 网络检查：只针对主动外连（connect/sendto），不拦监听（bind）/接收（recvfrom） */

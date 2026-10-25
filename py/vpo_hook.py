@@ -37,6 +37,9 @@ TEMPLATE_CONFIG = HOOK_DIR / "config.yaml"
 # ~/.pyenv/versions/3.11/bin/python3 这类真实二进制。
 SHIM_DIR_MARKERS = ("/shims/", "/.asdf/shims/", "/.rbenv/shims/", "/.nodenv/shims/")
 
+# 简单安全组：系统运行时目录（只读放行，供解释器/系统库加载）
+RUNTIME_DIRS = ("/usr", "/lib", "/lib64", "/bin", "/sbin")
+
 
 # ---------------------------------------------------------------------------
 # 平台与编译器
@@ -191,6 +194,117 @@ def expand_home(p: str) -> str:
     if p.startswith("~/"):
         return str(Path.home() / p[2:])
     return p
+
+
+# ---------------------------------------------------------------------------
+# 简单安全组（profile: simple）：极简 YAML 子集解析
+# ---------------------------------------------------------------------------
+def _simple_value(v: str):
+    v = v.split("#", 1)[0].strip()
+    if v == "[]":
+        return []
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        return v[1:-1]
+    return v
+
+
+def parse_simple_yaml(text: str) -> dict:
+    """解析简单安全组需要的 YAML 子集（mapping + 标量 + 行内 [] + block list）。"""
+    root: dict = {}
+    stack: list[tuple[int, object]] = [(-1, root)]
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+
+        if stripped.startswith("- "):
+            if isinstance(parent, list):
+                parent.append(_simple_value(stripped[2:]))
+            i += 1
+            continue
+
+        if ":" in stripped:
+            key, val = stripped.split(":", 1)
+            key = key.strip()
+            val = val.split("#", 1)[0].strip()
+            if val == "":
+                # 看下一行判断是 list 还是 dict
+                j = i + 1
+                while j < len(lines):
+                    nxt = lines[j].strip()
+                    if not nxt or nxt.startswith("#"):
+                        j += 1
+                        continue
+                    break
+                n_indent = len(lines[j]) - len(lines[j].lstrip()) if j < len(lines) else -1
+                if j < len(lines) and lines[j].lstrip().startswith("- ") and n_indent > indent:
+                    child: object = []
+                else:
+                    child = {}
+            else:
+                child = _simple_value(val)
+            if isinstance(parent, dict):
+                parent[key] = child
+                if isinstance(child, (dict, list)):
+                    stack.append((indent, child))
+        i += 1
+    return root
+
+
+def _simple_get(node, *keys):
+    cur = node
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return None
+        cur = cur[k]
+    return cur
+
+
+def simple_scalar(node, default, *keys):
+    v = _simple_get(node, *keys)
+    if v is None or isinstance(v, (dict, list)):
+        return default
+    return v
+
+
+def simple_list(node, *keys):
+    v = _simple_get(node, *keys)
+    if isinstance(v, list):
+        return [x for x in v if isinstance(x, str) and x]
+    if isinstance(v, str) and v:
+        return [v]
+    return []
+
+
+def detect_env_root(real: str, lang: str | None) -> Path | None:
+    """判定简单安全组的信任区根目录。"""
+    if lang == "python":
+        p = Path(real)
+        bin_dir = p.parent
+        if (bin_dir.parent / "pyvenv.cfg").exists():
+            return bin_dir.parent
+        venv = os.environ.get("VIRTUAL_ENV")
+        if venv:
+            return Path(venv)
+        return None
+    if lang == "js":
+        d = Path.cwd()
+        while True:
+            if (d / "package.json").exists():
+                return d
+            if d.parent == d:
+                break
+            d = d.parent
+        return Path.cwd()
+    return None
 
 
 def parse_audit(text: str, lang: str | None) -> tuple[bool, str, list[str]]:
@@ -351,6 +465,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     base = os.path.basename(real)
     lang = "python" if "python" in base else ("js" if "node" in base else None)
 
+    # 简单安全组：只有 profile: simple 且带 permissions 块才启用（旧配置兼容）
+    simple_cfg = None
+    if config_text:
+        _parsed = parse_simple_yaml(config_text)
+        if simple_scalar(_parsed, "", "profile") == "simple" and "permissions" in _parsed:
+            simple_cfg = _parsed
+
     # 设置注入环境变量（二进制 hook）
     env = dict(os.environ)
     if plat == "darwin":
@@ -368,6 +489,53 @@ def cmd_run(args: argparse.Namespace) -> int:
         env["VPO_ALLOW_NETWORK"] = ",".join(allow_network)
     if risk_markers:
         env["VPO_HIGH_RISK_MARKERS"] = ":".join(risk_markers)
+
+    if simple_cfg is not None:
+        env["VPO_ENV_ROOT"] = ""  # 先清空，避免继承旧值
+        _env_opt = simple_scalar(simple_cfg, "auto", "env")
+        if _env_opt == "auto":
+            root = detect_env_root(real, lang)
+        else:
+            root = Path(expand_home(_env_opt))
+        if root and root.exists():
+            env["VPO_ENV_ROOT"] = str(root)
+            env["VPO_RUNTIME_DIRS"] = ":".join(RUNTIME_DIRS)
+            extra = simple_list(simple_cfg, "permissions", "files", "extra_read") + \
+                simple_list(simple_cfg, "permissions", "files", "extra_write")
+            if extra:
+                env["VPO_EXTRA_PATHS"] = ":".join(expand_home(p) for p in extra)
+        else:
+            log("[vpo-hook] 无法判定环境根目录，简单安全组文件作用域未启用")
+
+        net_mode = simple_scalar(simple_cfg, "off", "permissions", "network", "mode")
+        env["VPO_NETWORK_MODE"] = net_mode
+        if net_mode == "allowlist":
+            al = simple_list(simple_cfg, "permissions", "network", "allowlist")
+            if al:
+                env["VPO_ALLOW_NETWORK"] = ",".join(al)
+        bl = simple_list(simple_cfg, "permissions", "network", "blocklist")
+        if bl:
+            env["VPO_NETWORK_BLOCKLIST"] = ",".join(bl)
+
+        exec_mode = simple_scalar(simple_cfg, "off", "permissions", "process", "exec")
+        env["VPO_EXEC_MODE"] = exec_mode
+        ea = simple_list(simple_cfg, "permissions", "process", "exec_allow")
+        if ea:
+            env["VPO_EXEC_ALLOW"] = ":".join(expand_home(p) for p in ea)
+
+        sw = simple_list(simple_cfg, "sensitive_words")
+        if sw:
+            prev = env.get("VPO_HIGH_RISK_MARKERS", "")
+            env["VPO_HIGH_RISK_MARKERS"] = (prev + ":" + ":".join(sw)) if prev else ":".join(sw)
+
+        env["VPO_INSPECT_INBOUND"] = "1" if simple_scalar(simple_cfg, "true", "inbound", "inspect") in ("true", "1", "yes", "on") else "0"
+        env["VPO_INBOUND_ACTION"] = simple_scalar(simple_cfg, "audit", "inbound", "action")
+        sa = simple_list(simple_cfg, "sources", "allow")
+        sd = simple_list(simple_cfg, "sources", "deny")
+        if sa:
+            env["VPO_SOURCES_ALLOW"] = ",".join(sa)
+        if sd:
+            env["VPO_SOURCES_DENY"] = ",".join(sd)
 
     # 名文 hook 注入（接口级，按目标语言）
     if config_text:

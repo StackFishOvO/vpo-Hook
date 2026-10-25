@@ -205,6 +205,111 @@ function parseAudit(text, lang) {
   return { enabled, log, classes };
 }
 
+// ---------------------------------------------------------------------------
+// 简单安全组（profile: simple）：极简 YAML 子集解析
+// ---------------------------------------------------------------------------
+function simpleValue(v) {
+  v = v.split('#')[0].trim();
+  if (v === '[]') return [];
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    return v.slice(1, -1);
+  }
+  return v;
+}
+
+function parseSimpleYaml(text) {
+  const root = {};
+  const stack = [{ indent: -1, node: root }];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const stripped = raw.trim();
+    if (!stripped || stripped.startsWith('#')) continue;
+    const indent = raw.length - raw.trimStart().length;
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop();
+    const parent = stack[stack.length - 1].node;
+
+    if (stripped.startsWith('- ')) {
+      if (Array.isArray(parent)) parent.push(simpleValue(stripped.slice(2)));
+      continue;
+    }
+    if (stripped.includes(':')) {
+      const idx = stripped.indexOf(':');
+      const key = stripped.slice(0, idx).trim();
+      let val = stripped.slice(idx + 1).split('#')[0].trim();
+      let child;
+      if (val === '') {
+        let j = i + 1;
+        while (j < lines.length) {
+          const nxt = lines[j].trim();
+          if (!nxt || nxt.startsWith('#')) { j++; continue; }
+          break;
+        }
+        const nIndent = j < lines.length ? lines[j].length - lines[j].trimStart().length : -1;
+        if (j < lines.length && lines[j].trimStart().startsWith('- ') && nIndent > indent) {
+          child = [];
+        } else {
+          child = {};
+        }
+      } else {
+        child = simpleValue(val);
+      }
+      if (parent !== null && typeof parent === 'object' && !Array.isArray(parent)) {
+        parent[key] = child;
+        if (child && typeof child === 'object') stack.push({ indent, node: child });
+      }
+    }
+  }
+  return root;
+}
+
+function simpleGet(node, ...keys) {
+  let cur = node;
+  for (const k of keys) {
+    if (!cur || typeof cur !== 'object' || !(k in cur)) return undefined;
+    cur = cur[k];
+  }
+  return cur;
+}
+
+function simpleScalar(node, dflt, ...keys) {
+  const v = simpleGet(node, ...keys);
+  if (v === undefined || v === null || typeof v === 'object') return dflt;
+  return v;
+}
+
+function simpleList(node, ...keys) {
+  const v = simpleGet(node, ...keys);
+  if (Array.isArray(v)) return v.filter((x) => typeof x === 'string' && x);
+  if (typeof v === 'string' && v) return [v];
+  return [];
+}
+
+const RUNTIME_DIRS = ['/usr', '/lib', '/lib64', '/bin', '/sbin'];
+
+function detectEnvRoot(real, lang) {
+  if (lang === 'python') {
+    const p = path.parse(real);
+    const binDir = p.dir;
+    const parent = path.dirname(binDir);
+    if (fs.existsSync(path.join(parent, 'pyvenv.cfg'))) return parent;
+    const venv = process.env.VIRTUAL_ENV;
+    if (venv) return venv;
+    return null;
+  }
+  if (lang === 'js') {
+    let d = process.cwd();
+    while (true) {
+      if (fs.existsSync(path.join(d, 'package.json'))) return d;
+      const parent = path.dirname(d);
+      if (parent === d) break;
+      d = parent;
+    }
+    return process.cwd();
+  }
+  return null;
+}
+
 function parseYamlList(text, key) {
   const result = [];
   let inSection = false;
@@ -337,6 +442,14 @@ function cmdRun(args) {
   const base = path.basename(real);
   const lang = base.includes('python') ? 'python' : base.includes('node') ? 'js' : null;
 
+  let simpleCfg = null;
+  if (configText) {
+    const parsed = parseSimpleYaml(configText);
+    if (simpleScalar(parsed, '', 'profile') === 'simple' && 'permissions' in parsed) {
+      simpleCfg = parsed;
+    }
+  }
+
   const env = { ...process.env };
   if (plat === 'darwin') env.DYLD_INSERT_LIBRARIES = lib;
   else env.LD_PRELOAD = lib;
@@ -349,6 +462,51 @@ function cmdRun(args) {
   }
   if (allowNetwork.length) env.VPO_ALLOW_NETWORK = allowNetwork.join(',');
   if (riskMarkers.length) env.VPO_HIGH_RISK_MARKERS = riskMarkers.join(':');
+
+  if (simpleCfg) {
+    env.VPO_ENV_ROOT = '';
+    const envOpt = simpleScalar(simpleCfg, 'auto', 'env');
+    let root = envOpt === 'auto' ? detectEnvRoot(real, lang) : expandHome(envOpt);
+    if (root && fs.existsSync(root)) {
+      env.VPO_ENV_ROOT = root;
+      env.VPO_RUNTIME_DIRS = RUNTIME_DIRS.join(':');
+      const extra = [
+        ...simpleList(simpleCfg, 'permissions', 'files', 'extra_read'),
+        ...simpleList(simpleCfg, 'permissions', 'files', 'extra_write'),
+      ];
+      if (extra.length) env.VPO_EXTRA_PATHS = extra.map(expandHome).join(':');
+    } else {
+      log('[vpo-hook] 无法判定环境根目录，简单安全组文件作用域未启用');
+    }
+
+    const netMode = simpleScalar(simpleCfg, 'off', 'permissions', 'network', 'mode');
+    env.VPO_NETWORK_MODE = netMode;
+    if (netMode === 'allowlist') {
+      const al = simpleList(simpleCfg, 'permissions', 'network', 'allowlist');
+      if (al.length) env.VPO_ALLOW_NETWORK = al.join(',');
+    }
+    const bl = simpleList(simpleCfg, 'permissions', 'network', 'blocklist');
+    if (bl.length) env.VPO_NETWORK_BLOCKLIST = bl.join(',');
+
+    const execMode = simpleScalar(simpleCfg, 'off', 'permissions', 'process', 'exec');
+    env.VPO_EXEC_MODE = execMode;
+    const ea = simpleList(simpleCfg, 'permissions', 'process', 'exec_allow');
+    if (ea.length) env.VPO_EXEC_ALLOW = ea.map(expandHome).join(':');
+
+    const sw = simpleList(simpleCfg, 'sensitive_words');
+    if (sw.length) {
+      const prev = env.VPO_HIGH_RISK_MARKERS || '';
+      env.VPO_HIGH_RISK_MARKERS = prev ? `${prev}:${sw.join(':')}` : sw.join(':');
+    }
+
+    const inspect = simpleScalar(simpleCfg, 'true', 'inbound', 'inspect');
+    env.VPO_INSPECT_INBOUND = ['true', '1', 'yes', 'on'].includes(inspect) ? '1' : '0';
+    env.VPO_INBOUND_ACTION = simpleScalar(simpleCfg, 'audit', 'inbound', 'action');
+    const sa = simpleList(simpleCfg, 'sources', 'allow');
+    const sd = simpleList(simpleCfg, 'sources', 'deny');
+    if (sa.length) env.VPO_SOURCES_ALLOW = sa.join(',');
+    if (sd.length) env.VPO_SOURCES_DENY = sd.join(',');
+  }
 
   if (configText) {
     if (lang === 'python') {
