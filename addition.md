@@ -390,6 +390,8 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 ### 6.10 简单安全组设计定稿（2026-10-25）
 
 > **实现状态（阶段 A）**：已实现 env_root 作用域、网络三态、exec 模式。启用条件：`profile: simple` **且** 存在 `permissions` 块（旧配置 `profile: simple` 但没有 `permissions` 块时保持旧行为）。`policy.c` 已编译通过，`verify_linux.sh` 46/46 通过。
+>
+> **实现状态（阶段 B）**：已实现 `vpo-hook scan <目录|文件>`（`nm -u` + Python `ast` + JS 正则），输出 `file/network/process/code_load` 四个能力组 + 置信度 + 证据；`run` 在简单安全组下会打印“发现能力”。首次运行弹权限组授权留到阶段 C（TUI/CLI + grants）。
 
 **已敲定的四个点**：
 

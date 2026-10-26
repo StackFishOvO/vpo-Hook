@@ -16,8 +16,11 @@ vpo-hook 启动器（Phase 4，Python 版）。
 from __future__ import annotations
 
 import argparse
+import ast
+import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -307,6 +310,212 @@ def detect_env_root(real: str, lang: str | None) -> Path | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# 能力发现（Phase B）：nm -u + Python AST + JS 正则
+# ---------------------------------------------------------------------------
+CAPABILITY_GROUPS = ("file", "network", "process", "code_load")
+
+_NATIVE_KEYWORDS = {
+    "file": ["open", "openat", "fopen", "read", "write", "unlink", "rename",
+             "mkdir", "rmdir", "stat", "fstat", "lstat", "truncate"],
+    "network": ["socket", "connect", "sendto", "recvfrom", "getaddrinfo",
+                "gethostbyname", "send", "recv"],
+    "process": ["execve", "execv", "execvp", "posix_spawn", "system", "popen",
+                "fork", "vfork", "kill"],
+    "code_load": ["dlopen"],
+}
+
+_JS_RULES = {
+    "file": [
+        r"require\(\s*['\"](?:node:)?fs['\"]\s*\)",
+        r"\bfs\.(?:readFile|readFileSync|writeFile|writeFileSync|open|openSync)\b",
+    ],
+    "network": [
+        r"require\(\s*['\"](?:node:)?(?:net|http|https|dns|tls)['\"]\s*\)",
+        r"\bfetch\s*\(",
+        r"require\(\s*['\"]undici['\"]\s*\)",
+    ],
+    "process": [
+        r"require\(\s*['\"](?:node:)?child_process['\"]\s*\)",
+        r"\b(?:exec|execSync|spawn|spawnSync)\s*\(",
+    ],
+    "code_load": [
+        r"\bprocess\.binding\b",
+        r"\bdlopen\b",
+        r"require\(\s*['\"]ffi(?:-napi)?['\"]\s*\)",
+    ],
+}
+
+_SCAN_SKIP = {"node_modules", ".venv", "venv", "__pycache__", "build", "dist", ".git"}
+
+
+def _nm_undefined(path: Path) -> list[str]:
+    nm = shutil.which("nm")
+    if not nm:
+        return []
+    try:
+        proc = subprocess.run(
+            [nm, "-u", str(path)], capture_output=True, text=True, check=False
+        )
+    except Exception:
+        return []
+    syms: list[str] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        tok = line.split()[-1].split("@")[0]
+        if tok:
+            syms.append(tok)
+    return syms
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _call_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _classify_py_call(fn: str, group_hits: dict[str, int]) -> None:
+    if fn == "open" or fn.startswith("pathlib.") or fn.startswith("shutil."):
+        group_hits["file"] = group_hits.get("file", 0) + 1
+    if fn.startswith("os.open") or fn.startswith("os.remove") or fn.startswith("os.unlink") \
+            or fn.startswith("os.rename") or fn.startswith("os.listdir"):
+        group_hits["file"] = group_hits.get("file", 0) + 1
+    if fn.startswith("os.system") or fn.startswith("os.popen") or fn.startswith("os.fork") \
+            or fn.startswith("os.exec") or fn.startswith("os.spawn") or fn.startswith("subprocess."):
+        group_hits["process"] = group_hits.get("process", 0) + 1
+    if fn.startswith("socket.") or fn.startswith("requests.") or fn.startswith("urllib.") \
+            or fn.startswith("http.") or fn.startswith("ftplib.") or fn.startswith("smtplib."):
+        group_hits["network"] = group_hits.get("network", 0) + 1
+    if fn.startswith("ctypes.CDLL") or fn.startswith("ctypes.util"):
+        group_hits["code_load"] = group_hits.get("code_load", 0) + 1
+
+
+def _scan_python(path: Path) -> dict[str, int]:
+    group_hits: dict[str, int] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        tree = ast.parse(text)
+    except Exception:
+        return group_hits
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    continue
+                if alias.name in ("socket", "requests", "urllib", "http", "ftplib", "smtplib"):
+                    group_hits["network"] = group_hits.get("network", 0) + 1
+                if alias.name == "subprocess":
+                    group_hits["process"] = group_hits.get("process", 0) + 1
+                if alias.name in ("ctypes", "importlib"):
+                    group_hits["code_load"] = group_hits.get("code_load", 0) + 1
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod.startswith("os") or mod.startswith("subprocess"):
+                group_hits["process"] = group_hits.get("process", 0) + 1
+            if mod.startswith(("socket", "urllib", "http", "requests")):
+                group_hits["network"] = group_hits.get("network", 0) + 1
+        elif isinstance(node, ast.Call):
+            _classify_py_call(_call_name(node.func), group_hits)
+        elif isinstance(node, ast.Attribute):
+            fn = _call_name(node)
+            if fn in ("os.system", "os.popen", "os.fork") or fn.startswith(("os.exec", "os.spawn", "subprocess.")):
+                group_hits["process"] = group_hits.get("process", 0) + 1
+            elif fn.startswith(("os.open", "os.remove", "os.unlink", "os.rename", "os.listdir", "shutil.")):
+                group_hits["file"] = group_hits.get("file", 0) + 1
+            elif fn.startswith(("socket.", "requests.", "urllib.", "http.", "ftplib.", "smtplib.")):
+                group_hits["network"] = group_hits.get("network", 0) + 1
+            elif fn.startswith("ctypes.CDLL"):
+                group_hits["code_load"] = group_hits.get("code_load", 0) + 1
+    return group_hits
+
+
+def _scan_js(path: Path) -> dict[str, int]:
+    group_hits: dict[str, int] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return group_hits
+    for group, patterns in _JS_RULES.items():
+        count = 0
+        for pat in patterns:
+            count += len(re.findall(pat, text))
+        if count:
+            group_hits[group] = group_hits.get(group, 0) + count
+    return group_hits
+
+
+def scan_capabilities(root: str | Path) -> dict[str, dict]:
+    """扫描目录/文件，返回 {group: {score, evidence}}。"""
+    root = Path(root)
+    files: list[Path] = []
+    if root.is_file():
+        files = [root]
+    else:
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            if any(part in _SCAN_SKIP for part in p.parts):
+                continue
+            if p.suffix in (".so", ".dylib", ".node", ".py", ".js", ".mjs", ".cjs"):
+                files.append(p)
+        if len(files) > 500:
+            files = files[:500]
+
+    group_hits: dict[str, dict[str, int]] = {g: {} for g in CAPABILITY_GROUPS}
+    evidence: dict[str, list[str]] = {g: [] for g in CAPABILITY_GROUPS}
+
+    for p in files:
+        if p.suffix in (".so", ".dylib", ".node"):
+            for sym in _nm_undefined(p):
+                for group, kws in _NATIVE_KEYWORDS.items():
+                    if any(kw in sym for kw in kws):
+                        group_hits[group][p.name] = group_hits[group].get(p.name, 0) + 1
+                        if len(evidence[group]) < 6:
+                            evidence[group].append(f"{p.name}: {sym}")
+                        break
+        elif p.suffix == ".py":
+            hits = _scan_python(p)
+            rel = str(p)
+            for group, n in hits.items():
+                group_hits[group][rel] = group_hits[group].get(rel, 0) + n
+                if len(evidence[group]) < 6:
+                    evidence[group].append(f"{rel}")
+        elif p.suffix in (".js", ".mjs", ".cjs"):
+            hits = _scan_js(p)
+            rel = str(p)
+            for group, n in hits.items():
+                group_hits[group][rel] = group_hits[group].get(rel, 0) + n
+                if len(evidence[group]) < 6:
+                    evidence[group].append(rel)
+
+    result: dict[str, dict] = {}
+    for group in CAPABILITY_GROUPS:
+        total = sum(group_hits[group].values())
+        score = min(1.0, total / 6.0)
+        result[group] = {"score": round(score, 2), "evidence": evidence[group]}
+    return result
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    caps = scan_capabilities(args.path)
+    if getattr(args, "json", False):
+        print(json.dumps(caps, ensure_ascii=False, indent=2))
+        return 0
+    print(f"[vpo-hook] 能力发现: {args.path}")
+    for group in CAPABILITY_GROUPS:
+        info = caps[group]
+        if info["score"] <= 0:
+            continue
+        ev = "; ".join(info["evidence"][:3])
+        print(f"  {group:<10} score={info['score']:.2f}  证据: {ev}")
+    return 0
+
+
 def parse_audit(text: str, lang: str | None) -> tuple[bool, str, list[str]]:
     """解析 audit 配置，返回 (enabled, log路径, classes列表)。"""
     enabled = False
@@ -537,6 +746,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         if sd:
             env["VPO_SOURCES_DENY"] = ",".join(sd)
 
+    if simple_cfg is not None and not quiet:
+        scan_root = env.get("VPO_ENV_ROOT") or str(Path.cwd())
+        caps = scan_capabilities(scan_root)
+        found = [g for g in CAPABILITY_GROUPS if caps[g]["score"] > 0]
+        if found:
+            log(f"[vpo-hook] 发现能力: {', '.join(found)}")
+        else:
+            log("[vpo-hook] 未发现明显能力（默认按简单安全组拒绝）")
+
     # 名文 hook 注入（接口级，按目标语言）
     if config_text:
         if lang == "python":
@@ -608,6 +826,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("-v", "--verbose", action="store_true", help="输出详细诊断信息")
     r.add_argument("cmd", nargs=argparse.REMAINDER, help="目标命令及其参数")
     sub.add_parser("status", help="显示当前状态")
+    sc = sub.add_parser("scan", help="扫描目录/文件的能力清单")
+    sc.add_argument("path", help="目录或文件路径")
+    sc.add_argument("--json", action="store_true", help="输出 JSON")
 
     args = p.parse_args(argv)
     if args.command == "init":
@@ -616,6 +837,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "scan":
+        return cmd_scan(args)
     return 0
 
 

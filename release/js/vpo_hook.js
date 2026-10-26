@@ -310,6 +310,132 @@ function detectEnvRoot(real, lang) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// 能力发现（Phase B）：nm -u + Python/JS 正则
+// ---------------------------------------------------------------------------
+const CAPABILITY_GROUPS = ['file', 'network', 'process', 'code_load'];
+
+const NATIVE_KEYWORDS = {
+  file: ['open', 'openat', 'fopen', 'read', 'write', 'unlink', 'rename', 'mkdir', 'rmdir', 'stat', 'fstat', 'lstat', 'truncate'],
+  network: ['socket', 'connect', 'sendto', 'recvfrom', 'getaddrinfo', 'gethostbyname', 'send', 'recv'],
+  process: ['execve', 'execv', 'execvp', 'posix_spawn', 'system', 'popen', 'fork', 'vfork', 'kill'],
+  code_load: ['dlopen'],
+};
+
+const JS_RULES = {
+  file: [/require\(\s*['"](?:node:)?fs['"]\s*\)/, /\bfs\.(?:readFile|readFileSync|writeFile|writeFileSync|open|openSync)\b/],
+  network: [/require\(\s*['"](?:node:)?(?:net|http|https|dns|tls)['"]\s*\)/, /\bfetch\s*\(/, /require\(\s*['"]undici['"]\s*\)/],
+  process: [/require\(\s*['"](?:node:)?child_process['"]\s*\)/, /\b(?:exec|execSync|spawn|spawnSync)\s*\(/],
+  code_load: [/\bprocess\.binding\b/, /\bdlopen\b/, /require\(\s*['"]ffi(?:-napi)?['"]\s*\)/],
+};
+
+const SCAN_SKIP = new Set(['node_modules', '.venv', 'venv', '__pycache__', 'build', 'dist', '.git']);
+
+function nmUndefined(file) {
+  const r = spawnSync('nm', ['-u', file], { stdio: 'pipe', encoding: 'utf8' });
+  if (r.error || r.status !== 0) return [];
+  return r.stdout
+    .split('\n')
+    .map((l) => l.trim().split(/\s+/).pop().split('@')[0])
+    .filter(Boolean);
+}
+
+function scanPythonHits(text) {
+  const hits = {};
+  const add = (g) => { hits[g] = (hits[g] || 0) + 1; };
+  if (/(^|\s)(open\s*\(|os\.(system|popen|fork|exec|spawn|open|remove|unlink|rename|listdir)|subprocess\.)/m.test(text)) {
+    if (/(open\s*\(|os\.(open|remove|unlink|rename|listdir)|shutil\.)/.test(text)) add('file');
+    if (/(os\.(system|popen|fork|exec|spawn)|subprocess\.)/.test(text)) add('process');
+  }
+  if (/import\s+(socket|requests|urllib|http|ftplib|smtplib)|from\s+(socket|urllib|http)/.test(text)) add('network');
+  if (/ctypes\.CDLL|importlib/.test(text)) add('code_load');
+  return hits;
+}
+
+function scanJsHits(text) {
+  const hits = {};
+  for (const group of CAPABILITY_GROUPS) {
+    for (const re of JS_RULES[group] || []) {
+      const m = text.match(re);
+      if (m) hits[group] = (hits[group] || 0) + 1;
+    }
+  }
+  return hits;
+}
+
+function walkFiles(root, out, limit) {
+  if (out.length >= limit) return;
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (_e) { return; }
+  for (const e of entries) {
+    const full = path.join(root, e.name);
+    if (e.isDirectory()) {
+      if (SCAN_SKIP.has(e.name)) continue;
+      walkFiles(full, out, limit);
+    } else if (e.isFile() && /\.(so|dylib|node|py|js|mjs|cjs)$/.test(e.name)) {
+      out.push(full);
+      if (out.length >= limit) return;
+    }
+  }
+}
+
+function scanCapabilities(rootPath) {
+  let files = [];
+  const st = fs.statSync(rootPath);
+  if (st.isFile()) files = [rootPath];
+  else walkFiles(rootPath, files, 500);
+
+  const counts = { file: {}, network: {}, process: {}, code_load: {} };
+  const evidence = { file: [], network: [], process: [], code_load: [] };
+
+  for (const file of files) {
+    const name = path.basename(file);
+    if (/\.(so|dylib|node)$/.test(name)) {
+      for (const sym of nmUndefined(file)) {
+        for (const group of CAPABILITY_GROUPS) {
+          if ((NATIVE_KEYWORDS[group] || []).some((kw) => sym.includes(kw))) {
+            counts[group][name] = (counts[group][name] || 0) + 1;
+            if (evidence[group].length < 6) evidence[group].push(`${name}: ${sym}`);
+            break;
+          }
+        }
+      }
+    } else {
+      let text = '';
+      try { text = fs.readFileSync(file, 'utf8'); } catch (_e) { continue; }
+      const hits = /\.py$/.test(name) ? scanPythonHits(text) : scanJsHits(text);
+      for (const group of CAPABILITY_GROUPS) {
+        if (hits[group]) {
+          counts[group][file] = (counts[group][file] || 0) + hits[group];
+          if (evidence[group].length < 6) evidence[group].push(file);
+        }
+      }
+    }
+  }
+
+  const result = {};
+  for (const group of CAPABILITY_GROUPS) {
+    const total = Object.values(counts[group]).reduce((a, b) => a + b, 0);
+    result[group] = { score: Math.min(1, total / 6), evidence: evidence[group] };
+  }
+  return result;
+}
+
+function cmdScan(args) {
+  const target = args[0];
+  if (!target) {
+    console.error('用法: vpo-hook scan <目录|文件>');
+    return 1;
+  }
+  const caps = scanCapabilities(target);
+  console.log(`[vpo-hook] 能力发现: ${target}`);
+  for (const group of CAPABILITY_GROUPS) {
+    if (caps[group].score <= 0) continue;
+    console.log(`  ${group.padEnd(10)} score=${caps[group].score.toFixed(2)}  证据: ${caps[group].evidence.slice(0, 3).join('; ')}`);
+  }
+  return 0;
+}
+
 function parseYamlList(text, key) {
   const result = [];
   let inSection = false;
@@ -508,6 +634,14 @@ function cmdRun(args) {
     if (sd.length) env.VPO_SOURCES_DENY = sd.join(',');
   }
 
+  if (simpleCfg && !quiet) {
+    let scanRoot = env.VPO_ENV_ROOT || process.cwd();
+    const caps = scanCapabilities(scanRoot);
+    const found = CAPABILITY_GROUPS.filter((g) => caps[g].score > 0);
+    if (found.length) log(`[vpo-hook] 发现能力: ${found.join(', ')}`);
+    else log('[vpo-hook] 未发现明显能力（默认按简单安全组拒绝）');
+  }
+
   if (configText) {
     if (lang === 'python') {
       const apis = parsePlaintextApis(configText, 'python');
@@ -573,8 +707,9 @@ function main() {
   if (cmd === 'init') code = cmdInit();
   else if (cmd === 'run') code = cmdRun(args.slice(1));
   else if (cmd === 'status') code = cmdStatus();
+  else if (cmd === 'scan') code = cmdScan(args.slice(1));
   else {
-    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status');
+    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan <目录|文件>');
     code = 1;
   }
   process.exit(code);
