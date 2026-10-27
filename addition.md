@@ -398,6 +398,8 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 > **实现状态（阶段 D，配置签名 + 审计链）**：已实现 HMAC-SHA256 信封签名（`~/.vpo-hook/config.sig`，含 `ts/nonce/expiry/sig`），密钥 `~/.vpo-hook/.sign_key`（0600），支持 `VPO_SIGN_KEY` 覆盖。`init` 对新生成的配置自动签名；`vpo-hook sign` 显式（重）签名；`run` 在存在 `.sig` 时校验，篡改/过期/缺密钥一律拒绝运行（失败关闭）。无 `.sig` 的旧配置保持不校验。grants 同样签名（`grants/<hash>.sig`），`run` 校验失败拒绝运行；`vpo-hook chain` 校验审计哈希链（`chain.log` + `.chain_head`，链头 HMAC(key, sha256(line))），篡改/截断可检测。
 >
 > **实现状态（阶段 E，跨运行时）**：C 扩展（ctypes 的 `.so`，`fopen64`）、Node 原生 addon（N-API，`open`/`read`）、shell（`sh -c cat`）均已验证走二进制 hook 返回蜜罐，并加入 `verify_linux.sh`（当前 49 PASS）。**Bun 二进制 hook 无效**（Bun 是 Zig，读文件走 raw syscall 绕过 libc），Bun 名文 hook（Proxy 拦 `fs.readFileSync`）对 JS/TS 都有效但只能 deny、进不了蜜罐；按决定**先不做**，留到设计运维脚本时一起做特殊 syscall hook。macOS 本次新增路径回归仍待 Mac 实机。
+>
+> **实现状态（简单组可用性）**：`RUNTIME_DIRS` 扩展为 `/usr:/lib:/lib64:/bin:/sbin:/etc:/proc:/sys:/dev:/run:/tmp:/var/tmp`，真实 Python/Node 启动不再误拦 `/etc` 等系统读取；内置 `SIMPLE_DENY_PATHS`（HOME 下 secret：`~/.ssh`、`~/.aws`、`~/.kube`、`~/.npmrc`、`~/.gitconfig`、`~/.gnupg`、浏览器 cookie 目录等）+ 蜜罐生成（文件 deny 精确蜜罐，目录 deny 生成常见文件名蜜罐）。`/etc/passwd` 改为**真实可读**（world-readable 系统信息，非 secret）；敏感保护对象是 HOME secret。用户可用 `sensitive_files` 追加。
 
 **已敲定的四个点**：
 

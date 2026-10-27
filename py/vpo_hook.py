@@ -52,8 +52,31 @@ SIGN_TTL = int(os.environ.get("VPO_SIGN_TTL", str(30 * 24 * 3600)))
 # ~/.pyenv/versions/3.11/bin/python3 这类真实二进制。
 SHIM_DIR_MARKERS = ("/shims/", "/.asdf/shims/", "/.rbenv/shims/", "/.nodenv/shims/")
 
-# 简单安全组：系统运行时目录（只读放行，供解释器/系统库加载）
-RUNTIME_DIRS = ("/usr", "/lib", "/lib64", "/bin", "/sbin")
+# 简单安全组：系统运行时目录（只读放行，供解释器/系统库加载；/etc 等由 OS 权限兜底写）
+RUNTIME_DIRS = (
+    "/usr", "/lib", "/lib64", "/bin", "/sbin",
+    "/etc", "/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp",
+)
+
+# 简单安全组：内置敏感 deny 列表（用户 HOME 下的真实 secret）
+SIMPLE_DENY_PATHS = (
+    "~/.ssh",
+    "~/.aws",
+    "~/.azure",
+    "~/.config/gcloud",
+    "~/.kube",
+    "~/.npmrc",
+    "~/.gitconfig",
+    "~/.git-credentials",
+    "~/.netrc",
+    "~/.gnupg",
+    "~/.local/share/keyrings",
+    "~/.docker/config.json",
+    "~/.config/google-chrome",
+    "~/.config/microsoft-edge",
+    "~/.mozilla/firefox",
+    "~/.vpo-test-data",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +356,36 @@ def detect_env_root(real: str, lang: str | None) -> Path | None:
             d = d.parent
         return Path.cwd()
     return None
+
+
+_HONEYPOT_DIR_FILES = (
+    "id_rsa", "id_rsa.pub", "authorized_keys", "known_hosts",
+    "credentials", "config", "config.json",
+    "Cookies", "Login Data", "cookies.sqlite", "logins.json",
+    "default", "secret.txt", "db.txt",
+)
+
+
+def generate_simple_honeypot(deny_paths: list[str]) -> dict[str, str]:
+    """为简单安全组的 deny 路径生成蜜罐，返回 deny -> 蜜罐路径 映射。"""
+    hdir = CONFIG_DIR / "honeypot"
+    hdir.mkdir(parents=True, exist_ok=True)
+    mapping: dict[str, str] = {}
+    for d in deny_paths:
+        if not d:
+            continue
+        key = hashlib.sha256(d.encode("utf-8")).hexdigest()[:16]
+        hp = hdir / key
+        src = Path(d)
+        if src.is_dir():
+            hp.mkdir(exist_ok=True)
+            for name in _HONEYPOT_DIR_FILES:
+                (hp / name).write_text("HONEYPOT_FAKE_DATA\n", encoding="utf-8")
+        else:
+            hp.parent.mkdir(parents=True, exist_ok=True)
+            hp.write_text("HONEYPOT_FAKE_DATA\n", encoding="utf-8")
+        mapping[d] = str(hp)
+    return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -1201,6 +1254,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             env["VPO_SOURCES_ALLOW"] = ",".join(sa)
         if sd:
             env["VPO_SOURCES_DENY"] = ",".join(sd)
+
+        # 内置敏感 deny + 用户 sensitive_files，并生成蜜罐
+        deny = [expand_home(p) for p in SIMPLE_DENY_PATHS]
+        deny += [expand_home(p) for p in simple_list(simple_cfg, "sensitive_files")]
+        if deny:
+            env["VPO_DENY_PATHS"] = ":".join(deny)
+            hm = generate_simple_honeypot(deny)
+            if hm:
+                env["VPO_REWRITE_MAP"] = ":".join(f"{k}={v}" for k, v in hm.items())
 
     # 名文 hook 注入（接口级，按目标语言）
     if config_text:

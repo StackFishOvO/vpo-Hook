@@ -300,7 +300,29 @@ function simpleList(node, ...keys) {
   return [];
 }
 
-const RUNTIME_DIRS = ['/usr', '/lib', '/lib64', '/bin', '/sbin'];
+const RUNTIME_DIRS = [
+  '/usr', '/lib', '/lib64', '/bin', '/sbin',
+  '/etc', '/proc', '/sys', '/dev', '/run', '/tmp', '/var/tmp',
+];
+
+const SIMPLE_DENY_PATHS = [
+  '~/.ssh',
+  '~/.aws',
+  '~/.azure',
+  '~/.config/gcloud',
+  '~/.kube',
+  '~/.npmrc',
+  '~/.gitconfig',
+  '~/.git-credentials',
+  '~/.netrc',
+  '~/.gnupg',
+  '~/.local/share/keyrings',
+  '~/.docker/config.json',
+  '~/.config/google-chrome',
+  '~/.config/microsoft-edge',
+  '~/.mozilla/firefox',
+  '~/.vpo-test-data',
+];
 
 function detectEnvRoot(real, lang) {
   if (lang === 'python') {
@@ -323,6 +345,37 @@ function detectEnvRoot(real, lang) {
     return process.cwd();
   }
   return null;
+}
+
+const HONEYPOT_DIR_FILES = [
+  'id_rsa', 'id_rsa.pub', 'authorized_keys', 'known_hosts',
+  'credentials', 'config', 'config.json',
+  'Cookies', 'Login Data', 'cookies.sqlite', 'logins.json',
+  'default', 'secret.txt', 'db.txt',
+];
+
+function generateSimpleHoneypot(denyPaths) {
+  const hdir = path.join(CONFIG_DIR, 'honeypot');
+  fs.mkdirSync(hdir, { recursive: true });
+  const mapping = {};
+  for (const d of denyPaths) {
+    if (!d) continue;
+    const key = crypto.createHash('sha256').update(d).digest('hex').slice(0, 16);
+    const hp = path.join(hdir, key);
+    let isDir = false;
+    try { isDir = fs.statSync(d).isDirectory(); } catch (_e) {}
+    if (isDir) {
+      fs.mkdirSync(hp, { recursive: true });
+      for (const name of HONEYPOT_DIR_FILES) {
+        fs.writeFileSync(path.join(hp, name), 'HONEYPOT_FAKE_DATA\n');
+      }
+    } else {
+      fs.mkdirSync(hdir, { recursive: true });
+      fs.writeFileSync(hp, 'HONEYPOT_FAKE_DATA\n');
+    }
+    mapping[d] = hp;
+  }
+  return mapping;
 }
 
 // ---------------------------------------------------------------------------
@@ -947,6 +1000,17 @@ function cmdRun(args) {
     const sd = simpleList(simpleCfg, 'sources', 'deny');
     if (sa.length) env.VPO_SOURCES_ALLOW = sa.join(',');
     if (sd.length) env.VPO_SOURCES_DENY = sd.join(',');
+
+    const deny = SIMPLE_DENY_PATHS.map(expandHome)
+      .concat(simpleList(simpleCfg, 'sensitive_files').map(expandHome));
+    if (deny.length) {
+      env.VPO_DENY_PATHS = deny.join(':');
+      const hm = generateSimpleHoneypot(deny);
+      const entries = Object.entries(hm);
+      if (entries.length) {
+        env.VPO_REWRITE_MAP = entries.map(([k, v]) => `${k}=${v}`).join(':');
+      }
+    }
   }
 
   if (simpleCfg && !quiet) {
