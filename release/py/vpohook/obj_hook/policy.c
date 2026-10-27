@@ -415,20 +415,23 @@ static int path_blocked(const char *path) {
     return 0;
 }
 
-static const char *rewrite_for(const char *path) {
-    if (!path || !*path) return NULL;
+static void rewrite_for(const char *path, char *out_buf, size_t out_len, const char **out) {
+    *out = NULL;
+    if (!path || !*path) return;
     for (size_t i = 0; i < deny_count; i++) {
         if (deny_paths[i] && match_path(path, deny_paths[i])) {
             if (i < rewrite_count && rewrite_paths[i]) {
-                if (strcmp(path, deny_paths[i]) == 0) return rewrite_paths[i];
-                static __thread char buf[PATH_MAX];
-                snprintf(buf, sizeof(buf), "%s%s", rewrite_paths[i], path + strlen(deny_paths[i]));
-                return buf;
+                if (strcmp(path, deny_paths[i]) == 0) {
+                    *out = rewrite_paths[i];
+                    return;
+                }
+                snprintf(out_buf, out_len, "%s%s", rewrite_paths[i], path + strlen(deny_paths[i]));
+                *out = out_buf;
+                return;
             }
-            return NULL;
+            return;
         }
     }
-    return NULL;
 }
 
 /* ---------------------------------------------------------------------------
@@ -604,7 +607,8 @@ int vpo_check(const char *func, void *args, vpo_action *action) {
 
     if (a->path && path_blocked(a->path)) {
         action->allow = 0;
-        const char *rw = rewrite_for(a->path);
+        const char *rw = NULL;
+        rewrite_for(a->path, action->rewrite_buf, sizeof(action->rewrite_buf), &rw);
         if (rw) action->rewrite = rw;
     }
     if (a->path2 && path_blocked(a->path2)) {

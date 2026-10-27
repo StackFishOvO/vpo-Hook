@@ -96,14 +96,14 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 
 ### P1（下一阶段）
 
-**I. `policy.c` 的 `rewrite_for` 隐式契约**
+**I. `policy.c` 的 `rewrite_for` 隐式契约（已修复：rewrite_buf 随 vpo_action）**
 - **问题**：`action->rewrite` 指向 `__thread buf`，调用方须在下一个 `vpo_check` 前用完。当前安全，但 wrapper 生成逻辑改动会破。
 - **修法**：改成 `rewrite_for(path, out_buf, out_len)` 调用方传 buffer，消灭隐式契约。或至少在 `vpo_hook.h` 注释这个约定。
 
 **J. `network_mode` 三态配置**（见“应该做”第 1 条）。
 - 默认值不单独拍板：跟随**简单安全组**的最终设计。简单组应按“手机权限”思路给安全默认；复杂组再暴露 allowlist/denylist/off。
 
-**K. `signatures.json` 加 `skip_on`/`noop` 标记**
+**K. `signatures.json` 加 `skip_on`/`noop` 标记（不做：简单组不开放任意 hook，无需 noop 优化）**
 - **问题**：Linux 侧 `close`/`mmap` 等函数生成空 wrapper（`vpo_check` 直接放行），高频调用白白增加 `dlsym` + 空转开销。
 - **修法**：`signatures.json` 加 `"skip_on": ["linux"]` 或 `"noop": true`，生成器据此跳过。
 
@@ -111,7 +111,7 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 - **问题**：`sitecustomize.py` 用 `open(..., "a")` + `f.write`，多线程下 `json.dumps` + `write` 非单次系统调用，可能交错。
 - **修法**：Python 用 `os.open(..., O_APPEND)` + `os.write` 单次/循环写完再 `close`；JS 用 `fs.openSync` + `fs.writeSync` 一次写。已实现，日志权限 `0600`。
 
-**M. `interpose.js` 的 `installLoader` 的 `isMain` 放行洞**
+**M. `installLoader` 的 `isMain` 放行洞（按非安全边界处理，不视为需修）**
 - **问题**：注释自认“guest could call `Module._load(..., true)`”。这是**功能上的绕过路径**。
 - **修法**：不要当成安全边界，文档写清楚。或者用 `require.main === module` 的启发式收紧（不完美但提高门槛）。
 
@@ -464,5 +464,16 @@ VPO_INBOUND_ACTION        audit | block
 ```
 
 **实施方式（opt-in）**：只有 `profile: simple` 且带新字段时才启用 env_root 作用域/网络三态/exec 模式；没有 `profile` 的旧配置保持现有行为，不破坏现有测试。阶段 A 改动集中在 `py/vpo_hook.py`、`js/vpo_hook.js`、`py/obj_hook/policy.c`、`js/obj_hook/policy.c` 和两份 `config.yaml` 模板，生成器不动。
+
+### 6.11 信源（L2）与 Hook 发现（Z）的定位（2026-10-27 决策）
+
+- **L2 信源放简单安全组**：重点场景是刚 `npm/pip install` 新包时，用包级来源（包名/版本/hash）做约束；后续再决定是否上对象级 taint。
+- **Z 与 L2 合并做**：不做“无保护跑一遍真实 app”的动态观察（会直接漏完），改用**静态符号提取**：
+  - 用户给一个 obj / namespace 当参数
+  - 不运行（或不完整运行）扫出里面交互的符号（`nm -u` + AST/包级分析），去重
+  - 按现有方法编译成只含这些符号的 hook 二进制（类似 CMake，但只做这件事）
+  - 用户再勾选哪些当蜜罐
+  - 这就是**复杂安全组**：用这套 SDK 做定制化
+- **非 libc raw call 怎么 hook**：暂未定。候选方向是 Linux `seccomp` user-notify（监督进程可拦截/改写 syscall，实现 Bun 蜜罐）或 `ptrace`；macOS 是 Endpoint Security/`DYLD`。等做运维脚本/特殊 syscall hook 阶段再定。
 
 ---

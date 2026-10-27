@@ -7,6 +7,7 @@
 #ifndef VPO_HOOK_H
 #define VPO_HOOK_H
 
+#include <limits.h>
 #include <stddef.h>
 #include <sys/socket.h>   /* socklen_t / struct sockaddr */
 
@@ -21,6 +22,7 @@
 typedef struct {
     int allow;              /* 1 = 放行，0 = 拒绝 */
     const char *rewrite;    /* rewrite_on_deny 时改写的新路径（Phase 3b） */
+    char rewrite_buf[PATH_MAX]; /* rewrite 子路径拼接缓冲，随本结构体生命周期，消除隐式契约 */
 } vpo_action;
 
 typedef struct {
