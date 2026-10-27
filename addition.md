@@ -392,6 +392,8 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 > **实现状态（阶段 A）**：已实现 env_root 作用域、网络三态、exec 模式。启用条件：`profile: simple` **且** 存在 `permissions` 块（旧配置 `profile: simple` 但没有 `permissions` 块时保持旧行为）。`policy.c` 已编译通过，`verify_linux.sh` 46/46 通过。
 >
 > **实现状态（阶段 B）**：已实现 `vpo-hook scan <目录|文件>`（`nm -u` + Python `ast` + JS 正则），输出 `file/network/process/code_load` 四个能力组 + 置信度 + 证据；`run` 在简单安全组下会打印“发现能力”。首次运行弹权限组授权留到阶段 C（TUI/CLI + grants）。
+>
+> **实现状态（阶段 C）**：已实现“拒绝 + 审计 + 授权闭环”。`policy.c` 用真实 open/write 绕过自身 wrapper 追加 `~/.vpo-hook/denials.log`（结构化为 `{ts,func,path}`）；Python 启动器由 `exec` 改为 `spawn+wait`（转发 SIGTERM），结束后在 stderr 打印本次被拒摘要；新增 `vpo-hook log / grant / revoke / list`；首次运行在 TTY 下交互询问 network/process 并写 grants（`~/.vpo-hook/grants/<hash>.json`，0600/0700）。JS 启动器已有 spawn+wait，同步支持 denials 摘要和 log/list/grant/revoke（不含交互首次授权）。写蜜罐按结论**不做**，写敏感数据仍默认 block。
 
 **已敲定的四个点**：
 

@@ -13,12 +13,16 @@
 
 #include "vpo_hook.h"
 
+#include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #if defined(__APPLE__)
 #define VPO_PRELOAD_KEY "DYLD_INSERT_LIBRARIES"
@@ -51,6 +55,9 @@ static char **exec_allow = NULL;      /* VPO_EXEC_ALLOW：可执行文件 */
 static size_t exec_allow_count = 0;
 static int network_mode = -1;         /* -1 旧行为, 0 off, 1 internet, 2 allowlist */
 static int exec_mode = -1;            /* -1 旧行为, 0 off, 1 allowlist, 2 shell */
+
+/* 拒绝审计：绕过自身 wrapper，用真实 open/write 追加到 denials.log */
+static int denials_fd = -1;
 
 /* ---------------------------------------------------------------------------
  * P0-B：constructor 时缓存原始环境变量。
@@ -102,6 +109,35 @@ static void cache_env(void) {
     cached_pythonpath_prefix = env_dup("VPO_PYTHONPATH");
     cached_node_options_prefix = env_dup("VPO_NODE_OPTIONS");
     cached_preload = env_dup(VPO_PRELOAD_KEY);
+}
+
+/* 用真实 open 打开拒绝日志（绕过我们自己的 open wrapper，避免递归） */
+static void open_denials_log(void) {
+    const char *path = getenv("VPO_DENIALS_LOG");
+    if (!path || !*path) return;
+    typedef int (*open_fn)(const char *, int, ...);
+    open_fn fn = (open_fn)dlsym(RTLD_NEXT, "open");
+    if (!fn) fn = (open_fn)dlsym(RTLD_NEXT, "open64");
+    if (!fn) return;
+    denials_fd = fn(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+}
+
+/* 追加一条拒绝记录，用真实 write 绕过自身 wrapper */
+static void log_denial(const char *func, const char *path) {
+    if (denials_fd < 0) return;
+    typedef ssize_t (*write_fn)(int, const void *, size_t);
+    static write_fn wf = NULL;
+    if (!wf) wf = (write_fn)dlsym(RTLD_NEXT, "write");
+    if (!wf) return;
+    char buf[2048];
+    int n = snprintf(buf, sizeof(buf),
+                     "{\"ts\":%lld,\"func\":\"%s\",\"path\":\"%s\"}\n",
+                     (long long)time(NULL),
+                     func ? func : "",
+                     path ? path : "");
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        wf(denials_fd, buf, (size_t)n);
+    }
 }
 
 /* 把 constructor 缓存的环境变量写回当前进程 environ。 */
@@ -310,6 +346,7 @@ static void load_policy(void) {
     if (loaded) return;
     loaded = 1;
     cache_env();
+    open_denials_log();
 
     parse_list(getenv("VPO_DENY_PATHS"), &deny_paths, &deny_count, ':');
     parse_list(getenv("VPO_ALLOW_NETWORK"), &allow_network, &allow_count, ',');
@@ -589,6 +626,9 @@ int vpo_check(const char *func, void *args, vpo_action *action) {
     /* 数据标记检查：跳过 stdout/stderr(fd<=2)，只拦写文件/写网络等真正外泄 */
     if (a->buf && a->fd > 2 && buffer_has_marker(a->buf, a->buflen)) {
         action->allow = 0;
+    }
+    if (!action->allow) {
+        log_denial(func, a->path);
     }
     return 0;
 }

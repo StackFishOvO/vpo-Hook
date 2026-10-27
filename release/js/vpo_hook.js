@@ -11,6 +11,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 // ---------------------------------------------------------------------------
@@ -21,6 +22,7 @@ const JS_PLAINTEXT = path.join(HERE, 'plaintext');
 const CONFIG_DIR = path.join(os.homedir(), '.vpo-hook');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.yaml');
 const TEMPLATE_CONFIG = path.join(HOOK_DIR, 'config.yaml');
+const GRANTS_DIR = path.join(CONFIG_DIR, 'grants');
 
 // 只匹配 shims 目录本身，不能匹配 /.pyenv/ 整棵子树（否则误伤
 // ~/.pyenv/versions/*/bin/python3 这类真实二进制）。
@@ -436,6 +438,133 @@ function cmdScan(args) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// 授权（Phase C）：grants 文件 + log/list/grant/revoke
+// ---------------------------------------------------------------------------
+function grantsPath(envRoot) {
+  const h = crypto.createHash('sha256').update(String(envRoot)).digest('hex').slice(0, 16);
+  return path.join(GRANTS_DIR, `${h}.json`);
+}
+
+function loadGrants(envRoot) {
+  try {
+    const data = JSON.parse(fs.readFileSync(grantsPath(envRoot), 'utf8'));
+    return data && typeof data === 'object' ? data : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function saveGrants(envRoot, grants) {
+  fs.mkdirSync(GRANTS_DIR, { recursive: true });
+  try { fs.chmodSync(GRANTS_DIR, 0o700); } catch (_e) {}
+  const p = grantsPath(envRoot);
+  fs.writeFileSync(p, JSON.stringify(grants, null, 2) + '\n');
+  try { fs.chmodSync(p, 0o600); } catch (_e) {}
+}
+
+function defaultGrants(envRoot) {
+  return {
+    version: 1,
+    env_root: String(envRoot),
+    files: { extra_read: [], extra_write: [] },
+    network: { mode: 'off', allowlist: [], blocklist: [] },
+    process: { exec: 'off', exec_allow: [] },
+  };
+}
+
+function mergeGrantsInto(grants, simpleCfg) {
+  const merged = JSON.parse(JSON.stringify(simpleCfg));
+  if (!grants) return merged;
+  const perms = merged.permissions || (merged.permissions = {});
+  const files = perms.files || (perms.files = {});
+  files.extra_read = (grants.files && grants.files.extra_read) || files.extra_read || [];
+  files.extra_write = (grants.files && grants.files.extra_write) || files.extra_write || [];
+  const net = perms.network || (perms.network = {});
+  net.mode = (grants.network && grants.network.mode) || net.mode || 'off';
+  net.allowlist = (grants.network && grants.network.allowlist) || net.allowlist || [];
+  net.blocklist = (grants.network && grants.network.blocklist) || net.blocklist || [];
+  const proc = perms.process || (perms.process = {});
+  proc.exec = (grants.process && grants.process.exec) || proc.exec || 'off';
+  proc.exec_allow = (grants.process && grants.process.exec_allow) || proc.exec_allow || [];
+  return merged;
+}
+
+function cmdLog(args) {
+  const n = args.find((a) => a === '-n') ? Number(args[args.indexOf('-n') + 1]) : 20;
+  const denials = path.join(CONFIG_DIR, 'denials.log');
+  let lines = [];
+  try { lines = fs.readFileSync(denials, 'utf8').trim().split('\n').filter(Boolean); } catch (_e) {}
+  const records = lines.slice(-n).map((l) => { try { return JSON.parse(l); } catch (_e) { return null; } }).filter(Boolean);
+  if (!records.length) {
+    console.log('[vpo-hook] 没有拒绝记录');
+    return 0;
+  }
+  console.log(`[vpo-hook] 最近 ${records.length} 条拒绝记录:`);
+  for (const r of records) console.log(`  ${r.func || '?'}  ${r.path || ''}`);
+  return 0;
+}
+
+function cmdList() {
+  if (!fs.existsSync(GRANTS_DIR)) { console.log('[vpo-hook] 没有授权记录'); return 0; }
+  const files = fs.readdirSync(GRANTS_DIR).filter((f) => f.endsWith('.json')).sort();
+  if (!files.length) { console.log('[vpo-hook] 没有授权记录'); return 0; }
+  for (const f of files) {
+    let data;
+    try { data = JSON.parse(fs.readFileSync(path.join(GRANTS_DIR, f), 'utf8')); } catch (_e) { continue; }
+    console.log(`env_root: ${data.env_root || '?'}`);
+    console.log(`  network: ${(data.network || {}).mode || 'off'} allowlist=${(data.network || {}).allowlist || []}`);
+    console.log(`  process: ${(data.process || {}).exec || 'off'} allow=${(data.process || {}).exec_allow || []}`);
+    console.log(`  files: read=${(data.files || {}).extra_read || []} write=${(data.files || {}).extra_write || []}`);
+  }
+  return 0;
+}
+
+function cmdGrant(args) {
+  let root = process.cwd();
+  const idx = args.indexOf('--root');
+  if (idx >= 0 && args[idx + 1]) {
+    root = args[idx + 1];
+    args.splice(idx, 2);
+  }
+  const kind = args[0];
+  const value = args[1];
+  const rest = args.slice(2);
+  const grants = loadGrants(root) || defaultGrants(root);
+  if (kind === 'network') {
+    grants.network.mode = value;
+    grants.network.allowlist = value === 'allowlist' ? rest : [];
+  } else if (kind === 'process') {
+    grants.process.exec = value;
+    grants.process.exec_allow = value === 'allowlist' ? rest : [];
+  } else if (kind === 'file') {
+    const key = value === 'read' ? 'extra_read' : 'extra_write';
+    grants.files[key] = Array.from(new Set([...(grants.files[key] || []), ...rest]));
+  } else {
+    console.error(`[vpo-hook] 未知授权类型: ${kind}`);
+    return 1;
+  }
+  saveGrants(root, grants);
+  console.log(`[vpo-hook] 已更新授权: ${grantsPath(root)}`);
+  return 0;
+}
+
+function cmdRevoke(args) {
+  let root = process.cwd();
+  const idx = args.indexOf('--root');
+  if (idx >= 0 && args[idx + 1]) {
+    root = args[idx + 1];
+  }
+  const p = grantsPath(root);
+  if (fs.existsSync(p)) {
+    fs.unlinkSync(p);
+    console.log(`[vpo-hook] 已撤销授权: ${p}`);
+  } else {
+    console.log('[vpo-hook] 没有该环境的授权');
+  }
+  return 0;
+}
+
 function parseYamlList(text, key) {
   const result = [];
   let inSection = false;
@@ -590,12 +719,16 @@ function cmdRun(args) {
   if (riskMarkers.length) env.VPO_HIGH_RISK_MARKERS = riskMarkers.join(':');
 
   if (simpleCfg) {
+    try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); } catch (_e) {}
+    env.VPO_DENIALS_LOG = path.join(CONFIG_DIR, 'denials.log');
     env.VPO_ENV_ROOT = '';
     const envOpt = simpleScalar(simpleCfg, 'auto', 'env');
     let root = envOpt === 'auto' ? detectEnvRoot(real, lang) : expandHome(envOpt);
     if (root && fs.existsSync(root)) {
       env.VPO_ENV_ROOT = root;
       env.VPO_RUNTIME_DIRS = RUNTIME_DIRS.join(':');
+      const grants = loadGrants(root);
+      if (grants) simpleCfg = mergeGrantsInto(grants, simpleCfg);
       const extra = [
         ...simpleList(simpleCfg, 'permissions', 'files', 'extra_read'),
         ...simpleList(simpleCfg, 'permissions', 'files', 'extra_write'),
@@ -679,10 +812,32 @@ function cmdRun(args) {
   if (verbose) env.VPO_HOOK_VERBOSE = '1';
 
   log(`[vpo-hook] 启动: ${real}`);
+  const denialsPath = path.join(CONFIG_DIR, 'denials.log');
+  let denialsOffset = 0;
+  try { if (fs.existsSync(denialsPath)) denialsOffset = fs.statSync(denialsPath).size; } catch (_e) {}
   const result = spawnSync(real, args.slice(1), { stdio: 'inherit', env });
   if (result.error) {
     console.error(`[vpo-hook] 启动失败: ${result.error.message}`);
     return 1;
+  }
+  if (!quiet) {
+    try {
+      if (fs.existsSync(denialsPath)) {
+        const tail = fs.readFileSync(denialsPath, 'utf8').slice(denialsOffset);
+        const records = tail.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch (_e) { return null; } }).filter(Boolean);
+        if (records.length) {
+          console.error(`[vpo-hook] 本次被拒绝 ${records.length} 次:`);
+          const seen = new Set();
+          for (const r of records.slice(0, 20)) {
+            const k = `${r.func || ''}|${r.path || ''}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            console.error(`  - ${r.func || '?'}  ${r.path || ''}`);
+          }
+          console.error('[vpo-hook] 授权: vpo-hook grant ... ; 详情: vpo-hook log');
+        }
+      }
+    } catch (_e) {}
   }
   return result.status == null ? 1 : result.status;
 }
@@ -708,8 +863,12 @@ function main() {
   else if (cmd === 'run') code = cmdRun(args.slice(1));
   else if (cmd === 'status') code = cmdStatus();
   else if (cmd === 'scan') code = cmdScan(args.slice(1));
+  else if (cmd === 'log') code = cmdLog(args.slice(1));
+  else if (cmd === 'list') code = cmdList();
+  else if (cmd === 'grant') code = cmdGrant(args.slice(1));
+  else if (cmd === 'revoke') code = cmdRevoke(args.slice(1));
   else {
-    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan <目录|文件>');
+    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan | log | list | grant | revoke');
     code = 1;
   }
   process.exit(code);

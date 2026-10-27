@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +36,8 @@ HOOK_DIR = HERE / "obj_hook"
 CONFIG_DIR = Path.home() / ".vpo-hook"
 CONFIG_PATH = CONFIG_DIR / "config.yaml"
 TEMPLATE_CONFIG = HOOK_DIR / "config.yaml"
+GRANTS_DIR = CONFIG_DIR / "grants"
+DENIALS_LOG = CONFIG_DIR / "denials.log"
 
 # 已知会剥离 LD_PRELOAD / DYLD_INSERT_LIBRARIES 的版本管理器 shim 目录。
 # 注意：只能匹配 shims 目录本身，不能匹配 /.pyenv/ 整棵子树，否则会误伤
@@ -516,6 +520,224 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# 授权（Phase C）：grants 文件 + 首次交互 + log/grant/revoke/list
+# ---------------------------------------------------------------------------
+def grants_path(env_root: str | Path) -> Path:
+    h = hashlib.sha256(str(env_root).encode("utf-8")).hexdigest()[:16]
+    return GRANTS_DIR / f"{h}.json"
+
+
+def load_grants(env_root: str | Path) -> dict | None:
+    p = grants_path(env_root)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def save_grants(env_root: str | Path, grants: dict) -> None:
+    GRANTS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        GRANTS_DIR.chmod(0o700)
+    except Exception:
+        pass
+    p = grants_path(env_root)
+    p.write_text(json.dumps(grants, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        p.chmod(0o600)
+    except Exception:
+        pass
+
+
+def default_grants(env_root: str | Path) -> dict:
+    return {
+        "version": 1,
+        "env_root": str(env_root),
+        "files": {"extra_read": [], "extra_write": []},
+        "network": {"mode": "off", "allowlist": [], "blocklist": []},
+        "process": {"exec": "off", "exec_allow": []},
+    }
+
+
+def prompt_first_run(env_root: str | Path, caps: dict[str, dict]) -> dict:
+    """交互式首次授权：只问 network / process，文件保持 env 内。"""
+    print(f"[vpo-hook] 首次运行，环境根: {env_root}", file=sys.stderr)
+    found = [g for g in CAPABILITY_GROUPS if caps[g]["score"] > 0]
+    if found:
+        print(f"[vpo-hook] 扫描发现能力: {', '.join(found)}", file=sys.stderr)
+    grants = default_grants(env_root)
+
+    if caps["network"]["score"] > 0:
+        try:
+            ans = input("允许联网（internet，公网 80/443/53）? [y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans in ("y", "yes"):
+            grants["network"]["mode"] = "internet"
+    if caps["process"]["score"] > 0:
+        try:
+            ans = input("允许执行子进程（shell）? [y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans in ("y", "yes"):
+            grants["process"]["exec"] = "shell"
+
+    save_grants(env_root, grants)
+    print(f"[vpo-hook] 已保存授权: {grants_path(env_root)}", file=sys.stderr)
+    return grants
+
+
+def _grant_target_env_root() -> Path:
+    # grant 默认把 cwd 当作环境根；也可以由调用方显式传入
+    return Path.cwd()
+
+
+def _merge_grants_into(grants: dict | None, simple_cfg: dict) -> dict:
+    """返回合并后的 effective 配置（grants 覆盖 config 的 permissions）。"""
+    merged = json.loads(json.dumps(simple_cfg))
+    if not grants:
+        return merged
+    perms = merged.setdefault("permissions", {})
+    files = perms.setdefault("files", {})
+    files["extra_read"] = grants.get("files", {}).get("extra_read", files.get("extra_read", []))
+    files["extra_write"] = grants.get("files", {}).get("extra_write", files.get("extra_write", []))
+    net = perms.setdefault("network", {})
+    net["mode"] = grants.get("network", {}).get("mode", net.get("mode", "off"))
+    net["allowlist"] = grants.get("network", {}).get("allowlist", net.get("allowlist", []))
+    net["blocklist"] = grants.get("network", {}).get("blocklist", net.get("blocklist", []))
+    proc = perms.setdefault("process", {})
+    proc["exec"] = grants.get("process", {}).get("exec", proc.get("exec", "off"))
+    proc["exec_allow"] = grants.get("process", {}).get("exec_allow", proc.get("exec_allow", []))
+    return merged
+
+
+def _read_denials_tail(n: int = 20) -> list[dict]:
+    if not DENIALS_LOG.exists():
+        return []
+    lines = DENIALS_LOG.read_text(encoding="utf-8", errors="ignore").splitlines()[-n:]
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+def _print_denial_summary(offset: int) -> None:
+    if not DENIALS_LOG.exists():
+        return
+    try:
+        with open(DENIALS_LOG, encoding="utf-8", errors="ignore") as f:
+            f.seek(offset)
+            tail = f.read()
+    except Exception:
+        return
+    records: list[dict] = []
+    for line in tail.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            continue
+    if not records:
+        return
+    print(f"[vpo-hook] 本次被拒绝 {len(records)} 次:", file=sys.stderr)
+    seen: set[tuple[str, str]] = set()
+    for r in records[:20]:
+        key = (str(r.get("func", "")), str(r.get("path", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        print(f"  - {r.get('func', '?')}  {r.get('path', '')}", file=sys.stderr)
+    print("[vpo-hook] 授权: vpo-hook grant ... ; 详情: vpo-hook log", file=sys.stderr)
+
+
+def cmd_log(args: argparse.Namespace) -> int:
+    n = getattr(args, "n", 20)
+    records = _read_denials_tail(n)
+    if not records:
+        print("[vpo-hook] 没有拒绝记录")
+        return 0
+    print(f"[vpo-hook] 最近 {len(records)} 条拒绝记录:")
+    for r in records:
+        print(f"  {r.get('func', '?')}  {r.get('path', '')}")
+    return 0
+
+
+def cmd_grant(args: argparse.Namespace) -> int:
+    root = Path(args.root) if getattr(args, "root", None) else _grant_target_env_root()
+    grants = load_grants(root) or default_grants(root)
+    kind = args.kind
+    if kind == "network":
+        mode = args.value
+        grants["network"]["mode"] = mode
+        if mode == "allowlist":
+            grants["network"]["allowlist"] = list(args.rest)
+        elif mode == "internet":
+            grants["network"]["allowlist"] = []
+    elif kind == "process":
+        mode = args.value
+        grants["process"]["exec"] = mode
+        if mode == "allowlist":
+            grants["process"]["exec_allow"] = list(args.rest)
+        else:
+            grants["process"]["exec_allow"] = []
+    elif kind == "file":
+        mode = args.value  # read | write
+        paths = list(args.rest)
+        key = "extra_read" if mode == "read" else "extra_write"
+        cur = set(grants["files"].get(key, []))
+        cur.update(paths)
+        grants["files"][key] = sorted(cur)
+    else:
+        print(f"[vpo-hook] 未知授权类型: {kind}", file=sys.stderr)
+        return 1
+    save_grants(root, grants)
+    print(f"[vpo-hook] 已更新授权: {grants_path(root)}")
+    return 0
+
+
+def cmd_revoke(args: argparse.Namespace) -> int:
+    root = Path(args.root) if getattr(args, "root", None) else _grant_target_env_root()
+    p = grants_path(root)
+    if p.exists():
+        p.unlink()
+        print(f"[vpo-hook] 已撤销授权: {p}")
+    else:
+        print("[vpo-hook] 没有该环境的授权")
+    return 0
+
+
+def cmd_list(_args: argparse.Namespace) -> int:
+    if not GRANTS_DIR.exists():
+        print("[vpo-hook] 没有授权记录")
+        return 0
+    files = sorted(GRANTS_DIR.glob("*.json"))
+    if not files:
+        print("[vpo-hook] 没有授权记录")
+        return 0
+    for f in files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        print(f"env_root: {data.get('env_root', '?')}")
+        net = data.get("network", {})
+        proc = data.get("process", {})
+        files_p = data.get("files", {})
+        print(f"  network: {net.get('mode', 'off')} allowlist={net.get('allowlist', [])}")
+        print(f"  process: {proc.get('exec', 'off')} allow={proc.get('exec_allow', [])}")
+        print(f"  files: read={files_p.get('extra_read', [])} write={files_p.get('extra_write', [])}")
+    return 0
+
+
 def parse_audit(text: str, lang: str | None) -> tuple[bool, str, list[str]]:
     """解析 audit 配置，返回 (enabled, log路径, classes列表)。"""
     enabled = False
@@ -700,6 +922,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         env["VPO_HIGH_RISK_MARKERS"] = ":".join(risk_markers)
 
     if simple_cfg is not None:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        env["VPO_DENIALS_LOG"] = str(DENIALS_LOG)
         env["VPO_ENV_ROOT"] = ""  # 先清空，避免继承旧值
         _env_opt = simple_scalar(simple_cfg, "auto", "env")
         if _env_opt == "auto":
@@ -709,10 +933,25 @@ def cmd_run(args: argparse.Namespace) -> int:
         if root and root.exists():
             env["VPO_ENV_ROOT"] = str(root)
             env["VPO_RUNTIME_DIRS"] = ":".join(RUNTIME_DIRS)
+
+            grants = load_grants(root)
+            caps = scan_capabilities(root)
+            if grants is None and sys.stdin.isatty() and not quiet:
+                grants = prompt_first_run(root, caps)
+            if grants is not None:
+                simple_cfg = _merge_grants_into(grants, simple_cfg)
+
             extra = simple_list(simple_cfg, "permissions", "files", "extra_read") + \
                 simple_list(simple_cfg, "permissions", "files", "extra_write")
             if extra:
                 env["VPO_EXTRA_PATHS"] = ":".join(expand_home(p) for p in extra)
+
+            if not quiet:
+                found = [g for g in CAPABILITY_GROUPS if caps[g]["score"] > 0]
+                if found:
+                    log(f"[vpo-hook] 发现能力: {', '.join(found)}")
+                else:
+                    log("[vpo-hook] 未发现明显能力（默认按简单安全组拒绝）")
         else:
             log("[vpo-hook] 无法判定环境根目录，简单安全组文件作用域未启用")
 
@@ -745,15 +984,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             env["VPO_SOURCES_ALLOW"] = ",".join(sa)
         if sd:
             env["VPO_SOURCES_DENY"] = ",".join(sd)
-
-    if simple_cfg is not None and not quiet:
-        scan_root = env.get("VPO_ENV_ROOT") or str(Path.cwd())
-        caps = scan_capabilities(scan_root)
-        found = [g for g in CAPABILITY_GROUPS if caps[g]["score"] > 0]
-        if found:
-            log(f"[vpo-hook] 发现能力: {', '.join(found)}")
-        else:
-            log("[vpo-hook] 未发现明显能力（默认按简单安全组拒绝）")
 
     # 名文 hook 注入（接口级，按目标语言）
     if config_text:
@@ -798,12 +1028,31 @@ def cmd_run(args: argparse.Namespace) -> int:
     sys.stdout.flush()
     sys.stderr.flush()
 
+    denials_offset = DENIALS_LOG.stat().st_size if DENIALS_LOG.exists() else 0
     try:
-        os.execvpe(real, [real] + list(args.cmd[1:]), env)
+        proc = subprocess.Popen([real] + list(args.cmd[1:]), env=env)
     except FileNotFoundError:
         print(f"[vpo-hook] 找不到可执行文件: {args.cmd[0]}", file=sys.stderr)
         return 1
-    return 0
+
+    def _forward_sigterm(signum: int, _frame) -> None:
+        try:
+            proc.send_signal(signum)
+        except Exception:
+            pass
+        sys.exit(128 + signum)
+
+    old_sigterm = signal.signal(signal.SIGTERM, _forward_sigterm)
+    try:
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        rc = 130
+    finally:
+        signal.signal(signal.SIGTERM, old_sigterm)
+
+    if not quiet:
+        _print_denial_summary(denials_offset)
+    return rc
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
@@ -830,6 +1079,20 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("path", help="目录或文件路径")
     sc.add_argument("--json", action="store_true", help="输出 JSON")
 
+    lg = sub.add_parser("log", help="查看最近拒绝记录")
+    lg.add_argument("-n", type=int, default=20, help="显示条数")
+
+    gr = sub.add_parser("grant", help="给某个环境根授权")
+    gr.add_argument("--root", help="环境根目录（默认当前目录）")
+    gr.add_argument("kind", choices=["network", "process", "file"], help="授权类型")
+    gr.add_argument("value", help="network: off|internet|allowlist；process: off|allowlist|shell；file: read|write")
+    gr.add_argument("rest", nargs=argparse.REMAINDER, help="allowlist 条目或路径")
+
+    rv = sub.add_parser("revoke", help="撤销某个环境根的全部授权")
+    rv.add_argument("--root", help="环境根目录（默认当前目录）")
+
+    sub.add_parser("list", help="列出所有授权")
+
     args = p.parse_args(argv)
     if args.command == "init":
         return cmd_init(args)
@@ -839,6 +1102,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(args)
     if args.command == "scan":
         return cmd_scan(args)
+    if args.command == "log":
+        return cmd_log(args)
+    if args.command == "grant":
+        return cmd_grant(args)
+    if args.command == "revoke":
+        return cmd_revoke(args)
+    if args.command == "list":
+        return cmd_list(args)
     return 0
 
 
