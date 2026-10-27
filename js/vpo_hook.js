@@ -1025,6 +1025,10 @@ function cmdRun(args) {
     if (lang === 'python') {
       const apis = parsePlaintextApis(configText, 'python');
       if (apis.length) {
+        if (!fs.existsSync(path.join(PY_PLAINTEXT, 'sitecustomize.py'))) {
+          console.error('[vpo-hook] 缺少 sitecustomize.py（打包不完整）');
+          return 1;
+        }
         env.VPO_HOOK_PY_API = apis.join(':');
         env.VPO_PYTHONPATH = PY_PLAINTEXT;
         env.PYTHONPATH = PY_PLAINTEXT + (env.PYTHONPATH ? ':' + env.PYTHONPATH : '');
@@ -1033,8 +1037,12 @@ function cmdRun(args) {
     } else if (lang === 'js') {
       const apis = parsePlaintextApis(configText, 'js');
       if (apis.length) {
-        env.VPO_HOOK_JS_API = apis.join(':');
         const preload = path.join(JS_PLAINTEXT, 'preload.js');
+        if (!fs.existsSync(preload)) {
+          console.error('[vpo-hook] 缺少 preload.js（打包不完整）');
+          return 1;
+        }
+        env.VPO_HOOK_JS_API = apis.join(':');
         env.VPO_NODE_OPTIONS = `--require ${preload}`;
         env.NODE_OPTIONS = `--require ${preload}` + (env.NODE_OPTIONS ? ' ' + env.NODE_OPTIONS : '');
         log(`[vpo-hook] 名文 hook(js): ${apis.join(', ')}`);

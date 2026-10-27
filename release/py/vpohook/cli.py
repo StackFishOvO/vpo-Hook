@@ -168,7 +168,14 @@ def cmd_init(_args: argparse.Namespace) -> int:
         append_chain({"event": "config_sign", "path": str(CONFIG_PATH)})
         print(f"[vpo-hook] 已签名配置: {SIG_PATH}")
 
-    lib = build_hook()
+    try:
+        lib = build_hook()
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"[vpo-hook] 编译失败：请检查 gcc/clang 是否安装（{exc}）",
+            file=sys.stderr,
+        )
+        return 1
     print(f"[vpo-hook] hook 库已编译: {lib}")
 
     # 自检：确认产物存在且可加载
@@ -1269,6 +1276,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         if lang == "python":
             apis = parse_plaintext_apis(config_text, "python")
             if apis:
+                if not (HERE / "plaintext" / "sitecustomize.py").exists():
+                    print("[vpo-hook] 缺少 plaintext/sitecustomize.py（打包不完整）", file=sys.stderr)
+                    return 1
                 env["VPO_HOOK_PY_API"] = ":".join(apis)
                 env["VPO_PYTHONPATH"] = str(HERE / "plaintext")
                 pp = env.get("PYTHONPATH", "")
@@ -1277,8 +1287,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         elif lang == "js":
             apis = parse_plaintext_apis(config_text, "js")
             if apis:
-                env["VPO_HOOK_JS_API"] = ":".join(apis)
                 preload = HERE / "js_plaintext" / "preload.js"
+                if not preload.exists():
+                    print("[vpo-hook] 缺少 preload.js（打包不完整）", file=sys.stderr)
+                    return 1
+                env["VPO_HOOK_JS_API"] = ":".join(apis)
                 env["VPO_NODE_OPTIONS"] = f"--require {preload}"
                 no = env.get("NODE_OPTIONS", "")
                 env["NODE_OPTIONS"] = (f"--require {preload} " + no).strip()

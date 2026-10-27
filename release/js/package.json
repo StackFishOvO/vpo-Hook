@@ -5,6 +5,12 @@
   "bin": {
     "vpo-hook": "vpo_hook.js"
   },
+  "files": [
+    "vpo_hook.js",
+    "obj_hook",
+    "plaintext",
+    "py_plaintext"
+  ],
   "license": "MIT",
   "engines": {
     "node": ">=14"

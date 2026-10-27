@@ -11,9 +11,16 @@ setup(
     include_package_data=True,
     package_data={
         "vpohook": [
-            "obj_hook/*",
-            "plaintext/*",
-            "js_plaintext/*",
+            "obj_hook/config.yaml",
+            "obj_hook/gen_wrappers.py",
+            "obj_hook/honeypot.py",
+            "obj_hook/policy.c",
+            "obj_hook/signatures.json",
+            "obj_hook/vpo_hook.h",
+            "plaintext/interpose.py",
+            "plaintext/sitecustomize.py",
+            "js_plaintext/interpose.js",
+            "js_plaintext/preload.js",
         ],
     },
     entry_points={
@@ -21,6 +28,7 @@ setup(
             "vpo-hook=vpohook.cli:main",
         ],
     },
-    python_requires=">=3.8",
+    python_requires=">=3.10",
+    zip_safe=False,
     install_requires=[],
 )

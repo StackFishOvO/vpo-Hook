@@ -133,22 +133,22 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 **O. 发布版缺预编译库**
 - 当前 `init` 用本机 clang 编译，普通人没装 clang 就用不了。发布版应带 macOS arm64/x86_64、Linux x64/arm64 的预编译 `libvpo_hook.dylib/.so`；`init` 默认本机编译（用户要求，避免 libc 不匹配），无编译器或编译失败时才 fallback 到预编译库。生成方案见 6.2。
 
-**P. `package.json` 缺 `files` 字段**
+**P. `package.json` 缺 `files` 字段（已修复）**
 - npm publish 默认带所有非 `.gitignore` 文件，`py_plaintext/` 是否被发布依赖默认行为。必须显式声明 `"files": ["vpo_hook.js", "obj_hook/", "plaintext/", "py_plaintext/"]`，排除 `wrapper.c`、`libvpo_hook.so`、`__pycache__/`。
 
-**Q. `setup.py` 的 `package_data` glob 风险**
+**Q. `setup.py` 的 `package_data` glob 风险（已修复）**
 - `obj_hook/*` 可能匹配 `__pycache__/` 和用户编译产物。改用 `MANIFEST.in` 精确列出，或 `package_data` 精确到文件名。
 
-**R. `python_requires=">=3.8"` 脆弱兼容**
+**R. `python_requires=">=3.8"` 脆弱兼容（已修复为 >=3.10）**
 - `str | None` 注解在 `from __future__ import annotations` 下当前 work，但函数体内用 `|` 会崩。改 `>=3.10` 或确保所有 `|` 只在注解位置。
 
-**S. `setup.py` 缺 `zip_safe=False`**
+**S. `setup.py` 缺 `zip_safe=False`（已修复）**
 - 防御性写法，声明“不能在 zip 里运行”。
 
-**T. `build_hook` 编译失败抛裸 traceback**
+**T. `build_hook` 编译失败抛裸 traceback（已修复）**
 - 捕获 `CalledProcessError`，打印友好错误（“编译失败，请检查 clang/gcc 是否安装”），退出码非零。
 
-**U. `js_plaintext/preload.js`/`py_plaintext/sitecustomize.py` 存在性无检查**
+**U. plaintext 文件存在性无检查（已修复）**
 - 打包漏了时，Node/Python 目标直接崩。启动器里加 `if not preload.exists(): 报错退出`。
 
 ### P3（未来/待设计，先记录不实现）
