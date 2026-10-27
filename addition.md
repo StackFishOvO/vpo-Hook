@@ -395,7 +395,7 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 >
 > **实现状态（阶段 C）**：已实现“拒绝 + 审计 + 授权闭环”。`policy.c` 用真实 open/write 绕过自身 wrapper 追加 `~/.vpo-hook/denials.log`（结构化为 `{ts,func,path}`）；Python 启动器由 `exec` 改为 `spawn+wait`（转发 SIGTERM），结束后在 stderr 打印本次被拒摘要；新增 `vpo-hook log / grant / revoke / list`；首次运行在 TTY 下交互询问 network/process 并写 grants（`~/.vpo-hook/grants/<hash>.json`，0600/0700）。JS 启动器已有 spawn+wait，同步支持 denials 摘要和 log/list/grant/revoke（不含交互首次授权）。写蜜罐按结论**不做**，写敏感数据仍默认 block。
 >
-> **实现状态（阶段 D，配置签名）**：已实现 HMAC-SHA256 信封签名（`~/.vpo-hook/config.sig`，含 `ts/nonce/expiry/sig`），密钥 `~/.vpo-hook/.sign_key`（0600），支持 `VPO_SIGN_KEY` 覆盖。`init` 对新生成的配置自动签名；`vpo-hook sign` 显式（重）签名；`run` 在存在 `.sig` 时校验，篡改/过期/缺密钥一律拒绝运行（失败关闭）。无 `.sig` 的旧配置保持不校验。**待续**：grants 签名 + 审计哈希链。
+> **实现状态（阶段 D，配置签名 + 审计链）**：已实现 HMAC-SHA256 信封签名（`~/.vpo-hook/config.sig`，含 `ts/nonce/expiry/sig`），密钥 `~/.vpo-hook/.sign_key`（0600），支持 `VPO_SIGN_KEY` 覆盖。`init` 对新生成的配置自动签名；`vpo-hook sign` 显式（重）签名；`run` 在存在 `.sig` 时校验，篡改/过期/缺密钥一律拒绝运行（失败关闭）。无 `.sig` 的旧配置保持不校验。grants 同样签名（`grants/<hash>.sig`），`run` 校验失败拒绝运行；`vpo-hook chain` 校验审计哈希链（`chain.log` + `.chain_head`，链头 HMAC(key, sha256(line))），篡改/截断可检测。
 
 **已敲定的四个点**：
 

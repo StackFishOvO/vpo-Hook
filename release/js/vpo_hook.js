@@ -25,6 +25,8 @@ const TEMPLATE_CONFIG = path.join(HOOK_DIR, 'config.yaml');
 const GRANTS_DIR = path.join(CONFIG_DIR, 'grants');
 const SIGN_KEY_PATH = path.join(CONFIG_DIR, '.sign_key');
 const SIG_PATH = path.join(CONFIG_DIR, 'config.sig');
+const CHAIN_LOG = path.join(CONFIG_DIR, 'chain.log');
+const CHAIN_HEAD = path.join(CONFIG_DIR, '.chain_head');
 const SIGN_TTL = Number(process.env.VPO_SIGN_TTL || 30 * 24 * 3600);
 
 // 只匹配 shims 目录本身，不能匹配 /.pyenv/ 整棵子树（否则误伤
@@ -457,6 +459,10 @@ function grantsPath(envRoot) {
   return path.join(GRANTS_DIR, `${h}.json`);
 }
 
+function grantsSigPath(envRoot) {
+  return grantsPath(envRoot).replace(/\.json$/, '.sig');
+}
+
 function loadGrants(envRoot) {
   try {
     const data = JSON.parse(fs.readFileSync(grantsPath(envRoot), 'utf8'));
@@ -470,8 +476,28 @@ function saveGrants(envRoot, grants) {
   fs.mkdirSync(GRANTS_DIR, { recursive: true });
   try { fs.chmodSync(GRANTS_DIR, 0o700); } catch (_e) {}
   const p = grantsPath(envRoot);
-  fs.writeFileSync(p, JSON.stringify(grants, null, 2) + '\n');
+  const data = Buffer.from(JSON.stringify(grants, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(p, data);
   try { fs.chmodSync(p, 0o600); } catch (_e) {}
+  const key = loadSignKey(true);
+  const env = signEnvelope(data, key);
+  fs.writeFileSync(grantsSigPath(envRoot), JSON.stringify(env, null, 2) + '\n');
+  try { fs.chmodSync(grantsSigPath(envRoot), 0o600); } catch (_e) {}
+  appendChain({ event: 'grant', env_root: String(envRoot), kind: 'grants' });
+}
+
+function verifyGrants(envRoot) {
+  const p = grantsPath(envRoot);
+  const sp = grantsSigPath(envRoot);
+  if (!fs.existsSync(sp)) return [true, ''];
+  if (!fs.existsSync(p)) return [false, 'grants 文件缺失但存在签名'];
+  const key = loadSignKey(false);
+  if (!key) return [false, 'grants 有签名但缺少密钥'];
+  let env = null;
+  try { env = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch (_e) {
+    return [false, 'grants 签名文件损坏'];
+  }
+  return verifyEnvelope(fs.readFileSync(p), env, key);
 }
 
 function defaultGrants(envRoot) {
@@ -569,6 +595,9 @@ function cmdRevoke(args) {
   const p = grantsPath(root);
   if (fs.existsSync(p)) {
     fs.unlinkSync(p);
+    const sp = grantsSigPath(root);
+    if (fs.existsSync(sp)) fs.unlinkSync(sp);
+    appendChain({ event: 'revoke', env_root: String(root) });
     console.log(`[vpo-hook] 已撤销授权: ${p}`);
   } else {
     console.log('[vpo-hook] 没有该环境的授权');
@@ -629,8 +658,69 @@ function cmdSign() {
   const env = signEnvelope(fs.readFileSync(CONFIG_PATH), key);
   fs.writeFileSync(SIG_PATH, JSON.stringify(env, null, 2) + '\n');
   try { fs.chmodSync(SIG_PATH, 0o600); } catch (_e) {}
+  appendChain({ event: 'config_sign', path: CONFIG_PATH });
   console.log(`[vpo-hook] 已签名: ${SIG_PATH} (有效期至 ${env.expiry})`);
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// 审计哈希链
+// ---------------------------------------------------------------------------
+const GENESIS_HEAD = '0'.repeat(64);
+
+function chainHead() {
+  if (fs.existsSync(CHAIN_HEAD)) {
+    const h = fs.readFileSync(CHAIN_HEAD, 'utf8').trim();
+    if (h) return h;
+  }
+  return GENESIS_HEAD;
+}
+
+function appendChain(event) {
+  const key = loadSignKey(true);
+  const prev = chainHead();
+  const entry = Object.assign({}, event, { prev });
+  const line = JSON.stringify(entry);
+  const head = crypto.createHmac('sha256', key)
+    .update(crypto.createHash('sha256').update(line).digest('hex'))
+    .digest('hex');
+  fs.appendFileSync(CHAIN_LOG, line + '\n');
+  fs.writeFileSync(CHAIN_HEAD, head);
+  try { fs.chmodSync(CHAIN_HEAD, 0o600); } catch (_e) {}
+}
+
+function verifyChain() {
+  if (!fs.existsSync(CHAIN_LOG)) return [true, ''];
+  const key = loadSignKey(false);
+  if (!key) return [false, '缺少签名密钥，无法校验链'];
+  let lines;
+  try { lines = fs.readFileSync(CHAIN_LOG, 'utf8').split('\n'); } catch (_e) {
+    return [false, '链日志读取失败'];
+  }
+  let head = GENESIS_HEAD;
+  let idx = 0;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    idx++;
+    let entry;
+    try { entry = JSON.parse(line); } catch (_e) { return [false, `第 ${idx} 行不是合法 JSON`]; }
+    if (entry.prev !== head) return [false, `第 ${idx} 行 prev 不匹配（链被篡改）`];
+    head = crypto.createHmac('sha256', key)
+      .update(crypto.createHash('sha256').update(line).digest('hex'))
+      .digest('hex');
+  }
+  if (chainHead() !== head) return [false, '链头不匹配（链被截断/篡改）'];
+  return [true, ''];
+}
+
+function cmdChain() {
+  const [ok, msg] = verifyChain();
+  if (ok) {
+    console.log('[vpo-hook] 审计链校验通过');
+    return 0;
+  }
+  console.error(`[vpo-hook] 审计链校验失败: ${msg}`);
+  return 1;
 }
 
 function parseYamlList(text, key) {
@@ -814,6 +904,11 @@ function cmdRun(args) {
     if (root && fs.existsSync(root)) {
       env.VPO_ENV_ROOT = root;
       env.VPO_RUNTIME_DIRS = RUNTIME_DIRS.join(':');
+      const [gok, gmsg] = verifyGrants(root);
+      if (!gok) {
+        console.error(`[vpo-hook] ${gmsg}，拒绝运行`);
+        return 1;
+      }
       const grants = loadGrants(root);
       if (grants) simpleCfg = mergeGrantsInto(grants, simpleCfg);
       const extra = [
@@ -955,8 +1050,9 @@ function main() {
   else if (cmd === 'grant') code = cmdGrant(args.slice(1));
   else if (cmd === 'revoke') code = cmdRevoke(args.slice(1));
   else if (cmd === 'sign') code = cmdSign();
+  else if (cmd === 'chain') code = cmdChain();
   else {
-    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan | log | list | grant | revoke | sign');
+    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan | log | list | grant | revoke | sign | chain');
     code = 1;
   }
   process.exit(code);

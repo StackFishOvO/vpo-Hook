@@ -43,6 +43,8 @@ GRANTS_DIR = CONFIG_DIR / "grants"
 DENIALS_LOG = CONFIG_DIR / "denials.log"
 SIGN_KEY_PATH = CONFIG_DIR / ".sign_key"
 SIG_PATH = CONFIG_DIR / "config.sig"
+CHAIN_LOG = CONFIG_DIR / "chain.log"
+CHAIN_HEAD = CONFIG_DIR / ".chain_head"
 SIGN_TTL = int(os.environ.get("VPO_SIGN_TTL", str(30 * 24 * 3600)))
 
 # 已知会剥离 LD_PRELOAD / DYLD_INSERT_LIBRARIES 的版本管理器 shim 目录。
@@ -140,6 +142,7 @@ def cmd_init(_args: argparse.Namespace) -> int:
             SIG_PATH.chmod(0o600)
         except Exception:
             pass
+        append_chain({"event": "config_sign", "path": str(CONFIG_PATH)})
         print(f"[vpo-hook] 已签名配置: {SIG_PATH}")
 
     lib = build_hook()
@@ -546,6 +549,10 @@ def grants_path(env_root: str | Path) -> Path:
     return GRANTS_DIR / f"{h}.json"
 
 
+def grants_sig_path(env_root: str | Path) -> Path:
+    return grants_path(env_root).with_name(grants_path(env_root).stem + ".sig")
+
+
 def load_grants(env_root: str | Path) -> dict | None:
     p = grants_path(env_root)
     if not p.exists():
@@ -564,11 +571,21 @@ def save_grants(env_root: str | Path, grants: dict) -> None:
     except Exception:
         pass
     p = grants_path(env_root)
-    p.write_text(json.dumps(grants, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    data = (json.dumps(grants, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    p.write_bytes(data)
     try:
         p.chmod(0o600)
     except Exception:
         pass
+    # 签名 + 审计链
+    key = load_sign_key(True)
+    env = sign_envelope(data, key)
+    grants_sig_path(env_root).write_text(json.dumps(env, indent=2) + "\n", encoding="utf-8")
+    try:
+        grants_sig_path(env_root).chmod(0o600)
+    except Exception:
+        pass
+    append_chain({"event": "grant", "env_root": str(env_root), "kind": "grants"})
 
 
 # ---------------------------------------------------------------------------
@@ -637,8 +654,95 @@ def cmd_sign(_args: argparse.Namespace) -> int:
         SIG_PATH.chmod(0o600)
     except Exception:
         pass
+    append_chain({"event": "config_sign", "path": str(CONFIG_PATH)})
     print(f"[vpo-hook] 已签名: {SIG_PATH} (有效期至 {env['expiry']})")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# grants 签名校验
+# ---------------------------------------------------------------------------
+def verify_grants(env_root: str | Path) -> tuple[bool, str]:
+    p = grants_path(env_root)
+    sp = grants_sig_path(env_root)
+    if not sp.exists():
+        return True, ""  # 未签名，靠 0600 权限保护
+    if not p.exists():
+        return False, "grants 文件缺失但存在签名"
+    key = load_sign_key(False)
+    if key is None:
+        return False, "grants 有签名但缺少密钥"
+    try:
+        env = json.loads(sp.read_text(encoding="utf-8"))
+    except Exception:
+        return False, "grants 签名文件损坏"
+    return verify_envelope(p.read_bytes(), env, key)
+
+
+# ---------------------------------------------------------------------------
+# 审计哈希链：每行 {event..., prev}，链头 HMAC(key, sha256(line))
+# ---------------------------------------------------------------------------
+_GENESIS_HEAD = "0" * 64
+
+
+def _chain_head() -> str:
+    if CHAIN_HEAD.exists():
+        h = CHAIN_HEAD.read_text(encoding="utf-8").strip()
+        if h:
+            return h
+    return _GENESIS_HEAD
+
+
+def append_chain(event: dict) -> None:
+    key = load_sign_key(True)
+    prev = _chain_head()
+    entry = dict(event)
+    entry["prev"] = prev
+    line = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+    head = hmac.new(key, hashlib.sha256(line.encode("utf-8")).hexdigest().encode(), hashlib.sha256).hexdigest()
+    with open(CHAIN_LOG, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    CHAIN_HEAD.write_text(head, encoding="utf-8")
+    try:
+        CHAIN_HEAD.chmod(0o600)
+    except Exception:
+        pass
+
+
+def verify_chain() -> tuple[bool, str]:
+    if not CHAIN_LOG.exists():
+        return True, ""
+    key = load_sign_key(False)
+    if key is None:
+        return False, "缺少签名密钥，无法校验链"
+    head = _GENESIS_HEAD
+    try:
+        lines = CHAIN_LOG.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return False, "链日志读取失败"
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except Exception:
+            return False, f"第 {idx + 1} 行不是合法 JSON"
+        if entry.get("prev") != head:
+            return False, f"第 {idx + 1} 行 prev 不匹配（链被篡改）"
+        head = hmac.new(key, hashlib.sha256(line.encode("utf-8")).hexdigest().encode(), hashlib.sha256).hexdigest()
+    stored = _chain_head()
+    if stored != head:
+        return False, "链头不匹配（链被截断/篡改）"
+    return True, ""
+
+
+def cmd_chain(_args: argparse.Namespace) -> int:
+    ok, msg = verify_chain()
+    if ok:
+        print("[vpo-hook] 审计链校验通过")
+        return 0
+    print(f"[vpo-hook] 审计链校验失败: {msg}", file=sys.stderr)
+    return 1
 
 
 def default_grants(env_root: str | Path) -> dict:
@@ -797,6 +901,10 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     p = grants_path(root)
     if p.exists():
         p.unlink()
+        sp = grants_sig_path(root)
+        if sp.exists():
+            sp.unlink()
+        append_chain({"event": "revoke", "env_root": str(root)})
         print(f"[vpo-hook] 已撤销授权: {p}")
     else:
         print("[vpo-hook] 没有该环境的授权")
@@ -1039,6 +1147,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             env["VPO_ENV_ROOT"] = str(root)
             env["VPO_RUNTIME_DIRS"] = ":".join(RUNTIME_DIRS)
 
+            ok, gmsg = verify_grants(root)
+            if not ok:
+                print(f"[vpo-hook] {gmsg}，拒绝运行", file=sys.stderr)
+                return 1
             grants = load_grants(root)
             caps = scan_capabilities(root)
             if grants is None and sys.stdin.isatty() and not quiet:
@@ -1198,6 +1310,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("list", help="列出所有授权")
     sub.add_parser("sign", help="对配置文件签名")
+    sub.add_parser("chain", help="校验审计链")
 
     args = p.parse_args(argv)
     if args.command == "init":
@@ -1218,6 +1331,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list(args)
     if args.command == "sign":
         return cmd_sign(args)
+    if args.command == "chain":
+        return cmd_chain(args)
     return 0
 
 
