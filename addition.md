@@ -494,4 +494,6 @@ VPO_INBOUND_ACTION        audit | block
   - **不做符号转接层**（无稳定 ABI，脆弱、易崩，不值得）。
 - **两语言**：SDK `import vpoh` / `require('vpoh')`，同名 API，共享同一 `manifest.json`。
 
+> **实现状态（SDK 骨架）**：已实现 `py/vpoh.py` + `js/vpoh.js`，暴露 `discover`（反射候选面 + `nm -u`）/ `generate`（与 signatures 求交 → `gen_wrappers --only` subset → 编译 `libvpo_<pkg>.so`）/ `run` + `init/status/scan/log/grant/revoke/list/sign/chain` 薄封装。生成器（py/js）支持 `--only` subset，输出逐字节一致。SDK 目前只在源树，打包进 wheel/npm 待 P3。
+
 ---

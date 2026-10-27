@@ -580,11 +580,13 @@ def macos_skipped(data: dict) -> list[str]:
     ]
 
 
-def generate_linux(data: dict) -> str:
+def generate_linux(data: dict, only_names: set[str] | None = None) -> str:
     functions: dict = data.get("functions", {})
     body = [LINUX_HEADER]
     for name, meta in functions.items():
         if not platform_enabled(meta, "linux"):
+            continue
+        if only_names is not None and name not in only_names:
             continue
         body.append(gen_linux_wrapper(name, meta))
         for alias in meta.get("linux_aliases", []):
@@ -592,14 +594,16 @@ def generate_linux(data: dict) -> str:
     return "".join(body)
 
 
-def generate(data: dict, platform: str = "darwin") -> str:
+def generate(data: dict, platform: str = "darwin", only_names: set[str] | None = None) -> str:
     if platform == "linux":
-        return generate_linux(data)
+        return generate_linux(data, only_names)
     functions: dict = data.get("functions", {})
     body = [HEADER]
     skipped = set(macos_skipped(data))
     for name, meta in functions.items():
         if name in skipped:
+            continue
+        if only_names is not None and name not in only_names:
             continue
         body.append(gen_wrapper(name, meta))
     return "".join(body)
@@ -613,19 +617,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         "-p", "--platform", default="darwin", choices=["darwin", "linux"],
         help="目标平台（darwin=DYLD_INTERPOSE，linux=同名符号+RTLD_NEXT）",
     )
+    parser.add_argument(
+        "--only", default=None,
+        help="只生成这些函数（逗号分隔，用于按包定制）",
+    )
     args = parser.parse_args(argv)
 
     data = load_signatures(args.signatures)
+    only_names = set(args.only.split(",")) if args.only else None
 
-    code = generate(data, args.platform)
+    code = generate(data, args.platform, only_names)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(code)
 
     if args.platform == "linux":
-        print(
-            f"gen_wrappers: 已生成 {count_linux_wrappers(data)} 个 wrapper (Linux) "
-            f"-> {args.output}"
-        )
+        n = count_linux_wrappers(data)
+        label = f"{n} 个 wrapper (Linux)"
+        if only_names is not None:
+            label += f"，subset={len(only_names)}"
+        print(f"gen_wrappers: 已生成 {label} -> {args.output}")
     else:
         skipped = macos_skipped(data)
         n = len(data.get("functions", {})) - len(skipped)

@@ -1109,8 +1109,7 @@ function cmdStatus() {
 }
 
 // ---------------------------------------------------------------------------
-function main() {
-  const args = process.argv.slice(2);
+function dispatch(args) {
   const cmd = args[0];
   let code = 0;
   if (cmd === 'init') code = cmdInit();
@@ -1127,7 +1126,29 @@ function main() {
     console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan | log | list | grant | revoke | sign | chain');
     code = 1;
   }
-  process.exit(code);
+  return code;
 }
 
-main();
+function main() {
+  process.exit(dispatch(process.argv.slice(2)));
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  dispatch,
+  cmdInit,
+  cmdRun,
+  cmdStatus,
+  cmdScan,
+  cmdLog,
+  cmdGrant,
+  cmdRevoke,
+  cmdList,
+  cmdSign,
+  cmdChain,
+  scanCapabilities,
+  detectEnvRoot,
+};

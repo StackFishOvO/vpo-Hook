@@ -498,11 +498,12 @@ function macosSkipped(data) {
   );
 }
 
-function generateLinux(data) {
+function generateLinux(data, onlyNames = null) {
   const functions = data.functions || {};
   const body = [LINUX_HEADER];
   for (const [name, meta] of Object.entries(functions)) {
     if (!platformEnabled(meta, 'linux')) continue;
+    if (onlyNames && !onlyNames.has(name)) continue;
     body.push(genLinuxWrapper(name, meta));
     for (const alias of meta.linux_aliases || []) {
       body.push(genLinuxWrapper(alias, meta, alias));
@@ -511,13 +512,14 @@ function generateLinux(data) {
   return body.join('');
 }
 
-function generate(data, platform) {
-  if (platform === 'linux') return generateLinux(data);
+function generate(data, platform, onlyNames = null) {
+  if (platform === 'linux') return generateLinux(data, onlyNames);
   const functions = data.functions || {};
   const body = [HEADER];
   const skipped = new Set(macosSkipped(data));
   for (const [name, meta] of Object.entries(functions)) {
     if (skipped.has(name)) continue;
+    if (onlyNames && !onlyNames.has(name)) continue;
     body.push(genWrapper(name, meta));
   }
   return body.join('');
@@ -528,27 +530,31 @@ function main() {
   let sigPath = null;
   let outPath = 'wrapper.c';
   let platform = 'darwin';
+  let only = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '-o') {
       outPath = argv[++i];
     } else if (argv[i] === '-p' || argv[i] === '--platform') {
       platform = argv[++i];
+    } else if (argv[i] === '--only') {
+      only = new Set((argv[++i] || '').split(',').filter(Boolean));
     } else if (!sigPath) {
       sigPath = argv[i];
     }
   }
   if (!sigPath) {
-    console.error('用法: node gen_wrappers.js signatures.json [-o wrapper.c] [-p darwin|linux]');
+    console.error('用法: node gen_wrappers.js signatures.json [-o wrapper.c] [-p darwin|linux] [--only a,b,c]');
     process.exit(1);
   }
 
   const data = JSON.parse(fs.readFileSync(sigPath, 'utf8'));
-  const code = generate(data, platform);
+  const code = generate(data, platform, only);
   fs.writeFileSync(outPath, code);
 
   const names = Object.keys(data.functions || {});
   if (platform === 'linux') {
-    console.log(`gen_wrappers: 已生成 ${countLinuxWrappers(data)} 个 wrapper (Linux) -> ${outPath}`);
+    const n = countLinuxWrappers(data);
+    console.log(`gen_wrappers: 已生成 ${n} 个 wrapper (Linux)${only ? `，subset=${only.size}` : ''} -> ${outPath}`);
   } else {
     const skipped = macosSkipped(data);
     console.log(`gen_wrappers: 已生成 ${names.length - skipped.length} 个 wrapper -> ${outPath}`);
