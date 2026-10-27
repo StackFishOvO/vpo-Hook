@@ -18,14 +18,17 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import hmac
 import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -38,6 +41,9 @@ CONFIG_PATH = CONFIG_DIR / "config.yaml"
 TEMPLATE_CONFIG = HOOK_DIR / "config.yaml"
 GRANTS_DIR = CONFIG_DIR / "grants"
 DENIALS_LOG = CONFIG_DIR / "denials.log"
+SIGN_KEY_PATH = CONFIG_DIR / ".sign_key"
+SIG_PATH = CONFIG_DIR / "config.sig"
+SIGN_TTL = int(os.environ.get("VPO_SIGN_TTL", str(30 * 24 * 3600)))
 
 # 已知会剥离 LD_PRELOAD / DYLD_INSERT_LIBRARIES 的版本管理器 shim 目录。
 # 注意：只能匹配 shims 目录本身，不能匹配 /.pyenv/ 整棵子树，否则会误伤
@@ -112,7 +118,8 @@ def cmd_init(_args: argparse.Namespace) -> int:
     print(f"[vpo-hook] 平台检测: {platform.system()} {platform.machine()}")
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if not CONFIG_PATH.exists():
+    created = not CONFIG_PATH.exists()
+    if created:
         shutil.copyfile(TEMPLATE_CONFIG, CONFIG_PATH)
         print(f"[vpo-hook] 已生成默认配置: {CONFIG_PATH}")
     else:
@@ -123,6 +130,17 @@ def cmd_init(_args: argparse.Namespace) -> int:
     if not honeypot_script.exists():
         shutil.copyfile(HOOK_DIR / "honeypot.py", honeypot_script)
         print(f"[vpo-hook] 已生成蜜罐脚本: {honeypot_script}")
+
+    # 新生成的配置做签名；已有配置若需签名请显式运行 vpo-hook sign
+    if created:
+        key = load_sign_key(True)
+        env = sign_envelope(CONFIG_PATH.read_bytes(), key)
+        SIG_PATH.write_text(json.dumps(env, indent=2) + "\n", encoding="utf-8")
+        try:
+            SIG_PATH.chmod(0o600)
+        except Exception:
+            pass
+        print(f"[vpo-hook] 已签名配置: {SIG_PATH}")
 
     lib = build_hook()
     print(f"[vpo-hook] hook 库已编译: {lib}")
@@ -553,6 +571,76 @@ def save_grants(env_root: str | Path, grants: dict) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# 配置签名（Phase D）：HMAC-SHA256 + 时间戳/随机数/有效期
+# ---------------------------------------------------------------------------
+def load_sign_key(create: bool) -> bytes | None:
+    if "VPO_SIGN_KEY" in os.environ:
+        return os.environ["VPO_SIGN_KEY"].encode("utf-8")
+    if SIGN_KEY_PATH.exists():
+        return SIGN_KEY_PATH.read_bytes()
+    if create:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            CONFIG_DIR.chmod(0o700)
+        except Exception:
+            pass
+        key = secrets.token_bytes(32)
+        SIGN_KEY_PATH.write_bytes(key)
+        try:
+            SIGN_KEY_PATH.chmod(0o600)
+        except Exception:
+            pass
+        return key
+    return None
+
+
+def sign_envelope(data: bytes, key: bytes) -> dict:
+    ts = int(time.time())
+    nonce = secrets.token_hex(16)
+    expiry = ts + SIGN_TTL
+    payload = data + b"\n" + str(ts).encode() + b"\n" + nonce.encode() + b"\n" + str(expiry).encode()
+    sig = hmac.new(key, payload, hashlib.sha256).hexdigest()
+    return {"scheme": "hmac-sha256", "ts": ts, "nonce": nonce, "expiry": expiry, "sig": sig}
+
+
+def verify_envelope(data: bytes, env: dict, key: bytes) -> tuple[bool, str]:
+    if env.get("scheme") != "hmac-sha256":
+        return False, "未知签名方案"
+    ts = env.get("ts")
+    nonce = env.get("nonce")
+    expiry = env.get("expiry")
+    sig = env.get("sig")
+    if not all([ts is not None, nonce, expiry, sig]):
+        return False, "签名字段缺失"
+    try:
+        expiry_i = int(expiry)
+    except Exception:
+        return False, "签名有效期非法"
+    if int(time.time()) > expiry_i:
+        return False, "签名已过期，请运行 vpo-hook sign"
+    payload = data + b"\n" + str(ts).encode() + b"\n" + str(nonce).encode() + b"\n" + str(expiry).encode()
+    calc = hmac.new(key, payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc, str(sig)):
+        return False, "配置签名不匹配（配置被修改）"
+    return True, ""
+
+
+def cmd_sign(_args: argparse.Namespace) -> int:
+    if not CONFIG_PATH.exists():
+        print("[vpo-hook] 没有配置文件，请先 init", file=sys.stderr)
+        return 1
+    key = load_sign_key(True)
+    env = sign_envelope(CONFIG_PATH.read_bytes(), key)
+    SIG_PATH.write_text(json.dumps(env, indent=2) + "\n", encoding="utf-8")
+    try:
+        SIG_PATH.chmod(0o600)
+    except Exception:
+        pass
+    print(f"[vpo-hook] 已签名: {SIG_PATH} (有效期至 {env['expiry']})")
+    return 0
+
+
 def default_grants(env_root: str | Path) -> dict:
     return {
         "version": 1,
@@ -872,6 +960,23 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # 读配置
     config_text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
+
+    # 配置签名校验（有 .sig 才校验；无则旧行为不校验）
+    if SIG_PATH.exists() and config_text:
+        key = load_sign_key(False)
+        if key is None:
+            print("[vpo-hook] 配置有签名但缺少密钥，拒绝运行", file=sys.stderr)
+            return 1
+        try:
+            env_sig = json.loads(SIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            print("[vpo-hook] 配置签名文件损坏，拒绝运行", file=sys.stderr)
+            return 1
+        ok, msg = verify_envelope(config_text.encode("utf-8"), env_sig, key)
+        if not ok:
+            print(f"[vpo-hook] {msg}，拒绝运行", file=sys.stderr)
+            return 1
+
     deny_paths = parse_deny_paths(config_text) if config_text else []
     if deny_paths:
         log(f"[vpo-hook] deny_paths: {':'.join(expand_home(p) for p in deny_paths)}")
@@ -1092,6 +1197,7 @@ def main(argv: list[str] | None = None) -> int:
     rv.add_argument("--root", help="环境根目录（默认当前目录）")
 
     sub.add_parser("list", help="列出所有授权")
+    sub.add_parser("sign", help="对配置文件签名")
 
     args = p.parse_args(argv)
     if args.command == "init":
@@ -1110,6 +1216,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_revoke(args)
     if args.command == "list":
         return cmd_list(args)
+    if args.command == "sign":
+        return cmd_sign(args)
     return 0
 
 

@@ -23,6 +23,9 @@ const CONFIG_DIR = path.join(os.homedir(), '.vpo-hook');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.yaml');
 const TEMPLATE_CONFIG = path.join(HOOK_DIR, 'config.yaml');
 const GRANTS_DIR = path.join(CONFIG_DIR, 'grants');
+const SIGN_KEY_PATH = path.join(CONFIG_DIR, '.sign_key');
+const SIG_PATH = path.join(CONFIG_DIR, 'config.sig');
+const SIGN_TTL = Number(process.env.VPO_SIGN_TTL || 30 * 24 * 3600);
 
 // 只匹配 shims 目录本身，不能匹配 /.pyenv/ 整棵子树（否则误伤
 // ~/.pyenv/versions/*/bin/python3 这类真实二进制）。
@@ -83,11 +86,19 @@ function buildHook() {
 function cmdInit() {
   console.log(`[vpo-hook] 平台检测: ${process.platform} ${os.arch()}`);
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  if (!fs.existsSync(CONFIG_PATH)) {
+  const created = !fs.existsSync(CONFIG_PATH);
+  if (created) {
     fs.copyFileSync(TEMPLATE_CONFIG, CONFIG_PATH);
     console.log(`[vpo-hook] 已生成默认配置: ${CONFIG_PATH}`);
   } else {
     console.log(`[vpo-hook] 配置已存在: ${CONFIG_PATH}`);
+  }
+  if (created) {
+    const key = loadSignKey(true);
+    const env = signEnvelope(fs.readFileSync(CONFIG_PATH), key);
+    fs.writeFileSync(SIG_PATH, JSON.stringify(env, null, 2) + '\n');
+    try { fs.chmodSync(SIG_PATH, 0o600); } catch (_e) {}
+    console.log(`[vpo-hook] 已签名配置: ${SIG_PATH}`);
   }
   const honeypotScript = path.join(CONFIG_DIR, 'honeypot.js');
   if (!fs.existsSync(honeypotScript)) {
@@ -565,6 +576,63 @@ function cmdRevoke(args) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// 配置签名（Phase D）：HMAC-SHA256 + 时间戳/随机数/有效期
+// ---------------------------------------------------------------------------
+function loadSignKey(create) {
+  if (process.env.VPO_SIGN_KEY) return Buffer.from(process.env.VPO_SIGN_KEY, 'utf8');
+  if (fs.existsSync(SIGN_KEY_PATH)) return fs.readFileSync(SIGN_KEY_PATH);
+  if (create) {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    try { fs.chmodSync(CONFIG_DIR, 0o700); } catch (_e) {}
+    const key = crypto.randomBytes(32);
+    fs.writeFileSync(SIGN_KEY_PATH, key);
+    try { fs.chmodSync(SIGN_KEY_PATH, 0o600); } catch (_e) {}
+    return key;
+  }
+  return null;
+}
+
+function signEnvelope(data, key) {
+  const ts = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const expiry = ts + SIGN_TTL;
+  const payload = Buffer.concat([
+    data,
+    Buffer.from(`\n${ts}\n${nonce}\n${expiry}`),
+  ]);
+  const sig = crypto.createHmac('sha256', key).update(payload).digest('hex');
+  return { scheme: 'hmac-sha256', ts, nonce, expiry, sig };
+}
+
+function verifyEnvelope(data, env, key) {
+  if (env.scheme !== 'hmac-sha256') return [false, '未知签名方案'];
+  if (env.ts == null || !env.nonce || !env.expiry || !env.sig) return [false, '签名字段缺失'];
+  const expiry = Number(env.expiry);
+  if (!Number.isFinite(expiry)) return [false, '签名有效期非法'];
+  if (Math.floor(Date.now() / 1000) > expiry) return [false, '签名已过期，请运行 vpo-hook sign'];
+  const payload = Buffer.concat([
+    data,
+    Buffer.from(`\n${env.ts}\n${env.nonce}\n${env.expiry}`),
+  ]);
+  const calc = crypto.createHmac('sha256', key).update(payload).digest('hex');
+  if (calc !== String(env.sig)) return [false, '配置签名不匹配（配置被修改）'];
+  return [true, ''];
+}
+
+function cmdSign() {
+  if (!fs.existsSync(CONFIG_PATH)) {
+    console.error('[vpo-hook] 没有配置文件，请先 init');
+    return 1;
+  }
+  const key = loadSignKey(true);
+  const env = signEnvelope(fs.readFileSync(CONFIG_PATH), key);
+  fs.writeFileSync(SIG_PATH, JSON.stringify(env, null, 2) + '\n');
+  try { fs.chmodSync(SIG_PATH, 0o600); } catch (_e) {}
+  console.log(`[vpo-hook] 已签名: ${SIG_PATH} (有效期至 ${env.expiry})`);
+  return 0;
+}
+
 function parseYamlList(text, key) {
   const result = [];
   let inSection = false;
@@ -678,6 +746,25 @@ function cmdRun(args) {
   }
 
   const configText = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf8') : '';
+
+  if (fs.existsSync(SIG_PATH) && configText) {
+    const key = loadSignKey(false);
+    if (!key) {
+      console.error('[vpo-hook] 配置有签名但缺少密钥，拒绝运行');
+      return 1;
+    }
+    let envSig = null;
+    try { envSig = JSON.parse(fs.readFileSync(SIG_PATH, 'utf8')); } catch (_e) {
+      console.error('[vpo-hook] 配置签名文件损坏，拒绝运行');
+      return 1;
+    }
+    const [ok, msg] = verifyEnvelope(Buffer.from(configText, 'utf8'), envSig, key);
+    if (!ok) {
+      console.error(`[vpo-hook] ${msg}，拒绝运行`);
+      return 1;
+    }
+  }
+
   const denyPaths = configText ? parseDenyPaths(configText) : [];
   if (denyPaths.length) {
     log(`[vpo-hook] deny_paths: ${denyPaths.map(expandHome).join(':')}`);
@@ -867,8 +954,9 @@ function main() {
   else if (cmd === 'list') code = cmdList();
   else if (cmd === 'grant') code = cmdGrant(args.slice(1));
   else if (cmd === 'revoke') code = cmdRevoke(args.slice(1));
+  else if (cmd === 'sign') code = cmdSign();
   else {
-    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan | log | list | grant | revoke');
+    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan | log | list | grant | revoke | sign');
     code = 1;
   }
   process.exit(code);
