@@ -21,7 +21,7 @@ cleanup() {
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
-  rm -f /tmp/vpo_write_test.txt /tmp/vpo_pwned_flag "$ROOT/example/malicious.pkl" 2>/dev/null || true
+  rm -f /tmp/vpo_write_test.txt /tmp/vpo_pwned_flag "$ROOT/example/malicious.pkl" /tmp/vpo_ctest.c /tmp/vpo_ctest.so 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -285,6 +285,28 @@ else
   else
     pass "CVE port 3000 released"
   fi
+fi
+
+section "C extension / shell / node addon"
+cat > /tmp/vpo_ctest.c <<'EOF'
+#define _GNU_SOURCE
+#include <stdio.h>
+char *read_first(const char *path){ FILE *f=fopen64(path,"r"); if(!f) return ""; static char b[64]; size_t n=fread(b,1,40,f); b[n]=0; fclose(f); return b; }
+EOF
+cc -shared -fPIC -O2 -o /tmp/vpo_ctest.so /tmp/vpo_ctest.c
+
+run_case "C extension fopen64" "HONEYPOT" \
+  python3 py/vpo_hook.py run -q python3 -c 'import ctypes; lib=ctypes.CDLL("/tmp/vpo_ctest.so"); lib.read_first.restype=ctypes.c_char_p; print(lib.read_first(b"/etc/passwd"))'
+
+run_case "shell sh -c cat" "HONEYPOT" \
+  python3 py/vpo_hook.py run -q sh -c "cat /etc/passwd | head -1"
+
+if command -v node-gyp >/dev/null 2>&1; then
+  (cd test/node_bin_wrapper_test && node-gyp rebuild >/dev/null 2>&1)
+  run_case "node native addon readFirst" "HONEYPOT" \
+    python3 py/vpo_hook.py run -q node -e 'console.log(require("./test/node_bin_wrapper_test/build/Release/testaddon.node").readFirst("/etc/passwd"))'
+else
+  echo "SKIP node native addon (node-gyp 未安装)"
 fi
 
 section "release sync"
