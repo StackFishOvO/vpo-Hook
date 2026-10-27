@@ -476,4 +476,22 @@ VPO_INBOUND_ACTION        audit | block
   - 这就是**复杂安全组**：用这套 SDK 做定制化
 - **非 libc raw call 怎么 hook**：暂未定。候选方向是 Linux `seccomp` user-notify（监督进程可拦截/改写 syscall，实现 Bun 蜜罐）或 `ptrace`；macOS 是 Endpoint Security/`DYLD`。等做运维脚本/特殊 syscall hook 阶段再定。
 
+### 6.12 复杂安全组 SDK：L2 信源 + Z 定制（2026-10-27 定稿）
+
+- **discover 输入**：目录 / 包名 / namespace 过滤（或已加载的 obj）。
+- **discover 方法（只留候选面，不分析实际调用）**：
+  - Python：hook `import`（`sys.audit`/import hook）拿 module obj → `dir()` / `inspect.getmembers` 枚举方法
+  - JS：hook `Module._load` 拿 module obj → `Reflect.ownKeys` / `Object.getOwnPropertyNames` 枚举方法
+  - 原生 `.so/.dylib/.node`：`nm -u` 精确符号
+  - 依赖边：记录 `import`/`require` 关系
+- **manifest.json**：`{pkg:{name,version,root,hash}, deps:[...], symbols:[...], apis:{python:[...],js:[...]}}`，两语言输出同一份。
+- **generate**：候选符号/API 与 `signatures.json` 求交 → 生成 subset `wrapper.c` → 编译 `libvpo_<pkg>.so`；用户勾选 allow / deny / honeypot（文件读可蜜罐，网络/进程只能 deny/audit）。
+- **信源 enforce**：py/js 名文 sink 用栈归因到包，按 `sources.allow/deny` 判定。
+- **边界（定稿）**：
+  - 原生扩展：**二进制粗粒度兜底**（`open/read/write/connect/exec` 都拦，简单组/复杂组都生效），但不按包归因。
+  - 文件通道的二进制通信：**已由二进制 hook 覆盖**，不是缺口。
+  - 进程内内存传递（函数指针/共享内存）：**L4**，暂不做。
+  - **不做符号转接层**（无稳定 ABI，脆弱、易崩，不值得）。
+- **两语言**：SDK `import vpoh` / `require('vpoh')`，同名 API，共享同一 `manifest.json`。
+
 ---
