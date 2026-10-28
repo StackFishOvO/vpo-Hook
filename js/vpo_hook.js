@@ -327,6 +327,8 @@ const SIMPLE_DENY_PATHS = [
   '~/.vpo-test-data',
 ];
 
+const SIMPLE_MARKERS = ['token', 'secret', 'password', 'private key', 'BEGIN PRIVATE KEY'];
+
 function detectEnvRoot(real, lang) {
   if (lang === 'python') {
     const p = path.parse(real);
@@ -1018,10 +1020,7 @@ function cmdRun(args) {
     if (ea.length) env.VPO_EXEC_ALLOW = ea.map(expandHome).join(':');
 
     const sw = simpleList(simpleCfg, 'sensitive_words');
-    if (sw.length) {
-      const prev = env.VPO_HIGH_RISK_MARKERS || '';
-      env.VPO_HIGH_RISK_MARKERS = prev ? `${prev}:${sw.join(':')}` : sw.join(':');
-    }
+    env.VPO_HIGH_RISK_MARKERS = SIMPLE_MARKERS.concat(sw).join(':');
 
     const inspect = simpleScalar(simpleCfg, 'true', 'inbound', 'inspect');
     env.VPO_INSPECT_INBOUND = ['true', '1', 'yes', 'on'].includes(inspect) ? '1' : '0';

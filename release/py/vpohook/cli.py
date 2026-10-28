@@ -79,6 +79,9 @@ SIMPLE_DENY_PATHS = (
     "~/.vpo-test-data",
 )
 
+# 简单安全组：默认敏感数据标记
+SIMPLE_MARKERS = ("token", "secret", "password", "private key", "BEGIN PRIVATE KEY")
+
 
 # ---------------------------------------------------------------------------
 # 平台与编译器
@@ -1267,9 +1270,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             env["VPO_EXEC_ALLOW"] = ":".join(expand_home(p) for p in ea)
 
         sw = simple_list(simple_cfg, "sensitive_words")
-        if sw:
-            prev = env.get("VPO_HIGH_RISK_MARKERS", "")
-            env["VPO_HIGH_RISK_MARKERS"] = (prev + ":" + ":".join(sw)) if prev else ":".join(sw)
+        markers = list(SIMPLE_MARKERS) + sw
+        env["VPO_HIGH_RISK_MARKERS"] = ":".join(markers)
 
         env["VPO_INSPECT_INBOUND"] = "1" if simple_scalar(simple_cfg, "true", "inbound", "inspect") in ("true", "1", "yes", "on") else "0"
         env["VPO_INBOUND_ACTION"] = simple_scalar(simple_cfg, "audit", "inbound", "action")
