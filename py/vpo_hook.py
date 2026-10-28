@@ -47,6 +47,32 @@ SIG_PATH = CONFIG_DIR / "config.sig"
 CHAIN_LOG = CONFIG_DIR / "chain.log"
 CHAIN_HEAD = CONFIG_DIR / ".chain_head"
 SIGN_TTL = int(os.environ.get("VPO_SIGN_TTL", str(30 * 24 * 3600)))
+LIB_DIR = CONFIG_DIR / "lib"
+
+
+def hook_lib_path() -> Path:
+    """返回 hook 库路径：包内和用户目录都找，优先较新的产物。"""
+    name = "libvpo_hook.dylib" if detect_platform() == "darwin" else "libvpo_hook.so"
+    candidates = [p for p in (HOOK_DIR / name, LIB_DIR / name) if p.exists()]
+    if candidates:
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+    return LIB_DIR / name
+
+
+def _writable_dir(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".vpo_write_probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def build_lib_dir() -> Path:
+    """优先编译到包内（源码/用户级安装可写），只读安装回退到 ~/.vpo-hook/lib。"""
+    return HOOK_DIR if _writable_dir(HOOK_DIR) else LIB_DIR
 
 # 已知会剥离 LD_PRELOAD / DYLD_INSERT_LIBRARIES 的版本管理器 shim 目录。
 # 注意：只能匹配 shims 目录本身，不能匹配 /.pyenv/ 整棵子树，否则会误伤
@@ -117,26 +143,28 @@ def build_hook() -> Path:
 
     gen = HOOK_DIR / "gen_wrappers.py"
     sig = HOOK_DIR / "signatures.json"
-    wrapper = HOOK_DIR / "wrapper.c"
     policy = HOOK_DIR / "policy.c"
+    lib_dir = build_lib_dir()
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = lib_dir / "wrapper.c"
 
     # 1. 生成 wrapper.c（按平台）
     gen_platform = "linux" if plat == "linux" else "darwin"
     subprocess.run(
         [sys.executable, str(gen), str(sig), "-o", str(wrapper), "-p", gen_platform],
         check=True,
-        cwd=str(HOOK_DIR),
+        cwd=str(lib_dir),
     )
 
     # 2. 编译
     if plat == "darwin":
-        out = HOOK_DIR / "libvpo_hook.dylib"
-        cmd = [cc, "-dynamiclib", "-o", str(out), str(wrapper), str(policy)]
+        out = lib_dir / "libvpo_hook.dylib"
+        cmd = [cc, "-dynamiclib", "-I", str(HOOK_DIR), "-o", str(out), str(wrapper), str(policy)]
     else:  # linux
-        out = HOOK_DIR / "libvpo_hook.so"
-        cmd = [cc, "-shared", "-fPIC", "-o", str(out), str(wrapper), str(policy), "-ldl"]
+        out = lib_dir / "libvpo_hook.so"
+        cmd = [cc, "-shared", "-fPIC", "-I", str(HOOK_DIR), "-o", str(out), str(wrapper), str(policy), "-ldl"]
 
-    subprocess.run(cmd, check=True, cwd=str(HOOK_DIR))
+    subprocess.run(cmd, check=True, cwd=str(lib_dir))
     return out
 
 
@@ -1170,7 +1198,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"[vpo-hook] 指定的 hook 库不存在: {hook}", file=sys.stderr)
             return 1
     else:
-        lib = HOOK_DIR / ("libvpo_hook.dylib" if plat == "darwin" else "libvpo_hook.so")
+        lib = hook_lib_path()
     if not lib.exists():
         print("[vpo-hook] hook 库不存在，请先运行: vpo-hook init", file=sys.stderr)
         return 1
@@ -1396,8 +1424,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
-    plat = detect_platform()
-    lib = HOOK_DIR / ("libvpo_hook.dylib" if plat == "darwin" else "libvpo_hook.so")
+    lib = hook_lib_path()
     print(f"[vpo-hook] 平台: {platform.system()} {platform.machine()}")
     print(f"[vpo-hook] hook 库: {lib} {'(存在)' if lib.exists() else '(缺失，请 init)'}")
     print(f"[vpo-hook] 配置: {CONFIG_PATH} {'(存在)' if CONFIG_PATH.exists() else '(缺失)'}")

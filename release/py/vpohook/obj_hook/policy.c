@@ -57,6 +57,8 @@ static size_t exec_allow_count = 0;
 static int network_mode = -1;         /* -1 旧行为, 0 off, 1 internet, 2 allowlist */
 static int exec_mode = -1;            /* -1 旧行为, 0 off, 1 allowlist, 2 shell */
 static int data_mode = 0;             /* 0 block（默认拒绝）, 1 honeypot（外发数据重写成蜜罐） */
+static int inspect_inbound = 0;       /* 是否检查入站数据 */
+static int inbound_block = 0;         /* 1 = 入站命中直接拒绝, 0 = 只审计 */
 
 /* 拒绝审计：绕过自身 wrapper，用真实 open/write 追加到 denials.log */
 static int denials_fd = -1;
@@ -137,6 +139,22 @@ static void log_denial(const char *func, const char *path) {
                      (long long)time(NULL),
                      func ? func : "",
                      path ? path : "");
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        wf(denials_fd, buf, (size_t)n);
+    }
+}
+
+static void log_inbound(const char *func) {
+    if (denials_fd < 0) return;
+    typedef ssize_t (*write_fn)(int, const void *, size_t);
+    static write_fn wf = NULL;
+    if (!wf) wf = (write_fn)dlsym(RTLD_NEXT, "write");
+    if (!wf) return;
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf),
+                     "{\"ts\":%lld,\"func\":\"%s\",\"inbound\":1}\n",
+                     (long long)time(NULL),
+                     func ? func : "");
     if (n > 0 && (size_t)n < sizeof(buf)) {
         wf(denials_fd, buf, (size_t)n);
     }
@@ -374,6 +392,10 @@ static void load_policy(void) {
     }
     const char *dm = getenv("VPO_DATA_MODE");
     if (dm && strcmp(dm, "honeypot") == 0) data_mode = 1;
+    const char *ib = getenv("VPO_INSPECT_INBOUND");
+    if (ib && strcmp(ib, "1") == 0) inspect_inbound = 1;
+    const char *ia = getenv("VPO_INBOUND_ACTION");
+    if (ia && strcmp(ia, "block") == 0) inbound_block = 1;
 
     /* rewrite 映射：deny=蜜罐，冒号分隔 */
     const char *raw_map = getenv("VPO_REWRITE_MAP");
@@ -664,9 +686,17 @@ static void vpo_hook_constructor(void) {
     load_policy();
 }
 
+int vpo_check_inbound(const char *func, const void *buf, size_t len) {
+    load_policy();
+    if (!inspect_inbound || !buf || len == 0) return 0;
+    if (!buffer_has_marker(buf, len)) return 0;
+    if (inbound_block) return 1;
+    log_inbound(func);
+    return 0;
+}
+
 int vpo_check(const char *func, void *args, vpo_action *action) {
     load_policy();
-
     if (action == NULL) return 0;
 
     vpo_args *a = (vpo_args *)args;
@@ -695,7 +725,7 @@ int vpo_check(const char *func, void *args, vpo_action *action) {
         action->allow = 0;
     }
     /* 数据标记检查：跳过 stdout/stderr(fd<=2)，只拦写文件/写网络等真正外泄 */
-    if (a->buf && a->fd > 2) {
+    if (!a->inbound && a->buf && a->fd > 2) {
         int has = a->iovec
             ? iovec_has_marker((const struct iovec *)a->buf, (int)a->buflen)
             : buffer_has_marker(a->buf, a->buflen);

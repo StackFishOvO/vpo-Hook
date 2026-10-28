@@ -44,7 +44,7 @@ not_contains() {
 }
 
 ensure_built() {
-  if [ ! -f py/obj_hook/libvpo_hook.so ]; then
+  if [ ! -f py/obj_hook/libvpo_hook.so ] && [ ! -f "$HOME/.vpo-hook/lib/libvpo_hook.so" ]; then
     python3 py/vpo_hook.py init >/dev/null 2>&1
   fi
 }

@@ -225,6 +225,13 @@ def gen_args_packing(args: list[dict]) -> list[str]:
             if args:
                 lines.append(f"    vargs.fd = {args[0]['name']};")
             lines.append("    vargs.iovec = 1;")
+        elif check == "inbound_buffer":
+            lines.append(f"    vargs.buf = {a['name']};")
+            if nxt is not None:
+                lines.append(f"    vargs.buflen = {nxt['name']};")
+            if args:
+                lines.append(f"    vargs.fd = {args[0]['name']};")
+            lines.append("    vargs.inbound = 1;")
     return lines
 
 
@@ -287,6 +294,23 @@ def data_rewrite_lines(args: list[dict]) -> list[str]:
                 "    }",
             ]
     return []
+
+
+def inbound_buf_name(args: list[dict]) -> str | None:
+    for a in args:
+        if a.get("check") == "inbound_buffer":
+            return a["name"]
+    return None
+
+
+def inbound_post_lines(func_name: str, buf_name: str) -> list[str]:
+    return [
+        f"    if (result > 0 && vpo_check_inbound(\"{func_name}\", {buf_name}, (size_t)result)) {{",
+        f"        memset({buf_name}, 0, (size_t)result);",
+        "        errno = EPERM;",
+        "        result = -1;",
+        "    }",
+    ]
 
 
 def gen_static_wrapper(
@@ -376,6 +400,9 @@ def gen_static_wrapper(
     lines.extend(env_pre)
     lines.extend(data_rewrite_lines(args))
     lines.append(f"    {ret} result = {main_call};")
+    _ib = inbound_buf_name(args)
+    if _ib:
+        lines.extend(inbound_post_lines(name, _ib))
     lines.extend(env_post)
     if not env_post:
         lines.append(f"    {in_var} = 0;")
@@ -491,6 +518,9 @@ def gen_wrapper(name: str, meta: dict) -> str:
         lines.append(f"        return {deny_ret};")
         lines.append("    }")
         lines.append(f"    {ret} result = vpo_real_{name}({call_args_main});")
+        _ib = inbound_buf_name(args)
+        if _ib:
+            lines.extend(inbound_post_lines(name, _ib))
         lines.extend(env_post)
         if not env_post:
             lines.append(f"    {in_var} = 0;")
@@ -581,6 +611,9 @@ def gen_linux_wrapper(name: str, meta: dict, c_name: Optional[str] = None) -> st
     lines.append(f'        vpo_real_{c_name} = (vpo_real_{c_name}_t)dlsym(RTLD_NEXT, "{c_name}");')
     lines.append("    }")
     lines.append(f"    {ret} result = {main_call};")
+    _ib = inbound_buf_name(args)
+    if _ib:
+        lines.extend(inbound_post_lines(c_name, _ib))
     lines.extend(env_post)
     if not env_post:
         lines.append(f"    {in_var} = 0;")

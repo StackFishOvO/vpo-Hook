@@ -6,6 +6,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+LIB="py/obj_hook/libvpo_hook.so"
+[ -f "$LIB" ] || LIB="$HOME/.vpo-hook/lib/libvpo_hook.so"
 
 LOG_DIR="$ROOT/logs"
 mkdir -p "$LOG_DIR"
@@ -138,7 +140,7 @@ else
 fi
 
 section "symbols"
-out=$(nm -D py/obj_hook/libvpo_hook.so | grep -E ' T (open|open64|openat|openat64|fopen|fopen64|execve|execv|execvp|posix_spawn|posix_spawnp|vfork)$')
+out=$(nm -D "$LIB" | grep -E ' T (open|open64|openat|openat64|fopen|fopen64|execve|execv|execvp|posix_spawn|posix_spawnp|vfork)$')
 printf '%s\n' "$out"
 n=$(printf '%s\n' "$out" | grep -c ' T ')
 check_exact "LFS/process symbols" "12" "$n"

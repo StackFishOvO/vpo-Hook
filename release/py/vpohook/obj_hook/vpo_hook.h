@@ -37,6 +37,7 @@ typedef struct {
     size_t buflen;
     int fd;                        /* 文件描述符（write/sendto 的 fd/sockfd） */
     int iovec;                     /* 1 = buf 是 iovec 数组（writev），0 = 单块缓冲 */
+    int inbound;                   /* 1 = 入站数据（recv/recvfrom），0 = 出站/文件写 */
 } vpo_args;
 
 /*
@@ -47,6 +48,12 @@ typedef struct {
  * 返回 0。
  */
 int vpo_check(const char *func, void *args, vpo_action *action);
+
+/*
+ * 入站数据检查（recv/recvfrom 之后调用）：扫描实际收到的 buf，命中敏感标记时
+ * 返回 1（调用方应丢弃/拒绝），否则返回 0。audit 模式会写拒绝日志但不拒绝。
+ */
+int vpo_check_inbound(const char *func, const void *buf, size_t len);
 
 /*
  * P0-B：子进程环境继承。

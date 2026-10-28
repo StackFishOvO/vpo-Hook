@@ -162,7 +162,7 @@
       "category": "network",
       "args": [
         { "name": "sockfd", "type": "int" },
-        { "name": "buf", "type": "void *" },
+        { "name": "buf", "type": "void *", "check": "inbound_buffer" },
         { "name": "len", "type": "size_t" },
         { "name": "flags", "type": "int" },
         { "name": "src_addr", "type": "struct sockaddr *", "check": "sockaddr" },
@@ -184,7 +184,7 @@
       "category": "network",
       "args": [
         { "name": "sockfd", "type": "int" },
-        { "name": "buf", "type": "void *" },
+        { "name": "buf", "type": "void *", "check": "inbound_buffer" },
         { "name": "len", "type": "size_t" },
         { "name": "flags", "type": "int" }
       ]

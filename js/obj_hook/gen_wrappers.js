@@ -161,6 +161,11 @@ function genArgsPacking(args) {
       if (nxt) lines.push(`    vargs.buflen = ${nxt.name};`);
       if (args.length) lines.push(`    vargs.fd = ${args[0].name};`);
       lines.push('    vargs.iovec = 1;');
+    } else if (a.check === 'inbound_buffer') {
+      lines.push(`    vargs.buf = ${a.name};`);
+      if (nxt) lines.push(`    vargs.buflen = ${nxt.name};`);
+      if (args.length) lines.push(`    vargs.fd = ${args[0].name};`);
+      lines.push('    vargs.inbound = 1;');
     }
   }
   return lines;
@@ -219,6 +224,23 @@ function dataRewriteLines(args) {
     }
   }
   return [];
+}
+
+function inboundBufName(args) {
+  for (const a of args) {
+    if (a.check === 'inbound_buffer') return a.name;
+  }
+  return null;
+}
+
+function inboundPostLines(funcName, bufName) {
+  return [
+    `    if (result > 0 && vpo_check_inbound("${funcName}", ${bufName}, (size_t)result)) {`,
+    `        memset(${bufName}, 0, (size_t)result);`,
+    '        errno = EPERM;',
+    '        result = -1;',
+    '    }',
+  ];
 }
 
 function genStaticWrapper(name, meta, realSymbol, interposeCname, asmLabel, suffix) {
@@ -302,6 +324,10 @@ function genStaticWrapper(name, meta, realSymbol, interposeCname, asmLabel, suff
   lines.push(...envPre);
   lines.push(...dataRewriteLines(args));
   lines.push(`    ${ret} result = ${mainCall};`);
+  {
+    const ib = inboundBufName(args);
+    if (ib) lines.push(...inboundPostLines(name, ib));
+  }
   lines.push(...envPost);
   if (envPost.length === 0) {
     lines.push(`    ${inVar} = 0;`);
@@ -402,6 +428,10 @@ function genWrapper(name, meta) {
     lines.push(`        return ${denyRet};`);
     lines.push('    }');
     lines.push(`    ${ret} result = vpo_real_${name}(${callArgsMain});`);
+    {
+      const ib = inboundBufName(args);
+      if (ib) lines.push(...inboundPostLines(name, ib));
+    }
     lines.push(...envPost);
     if (envPost.length === 0) {
       lines.push(`    ${inVar} = 0;`);
@@ -498,6 +528,10 @@ function genLinuxWrapper(name, meta, cName = name) {
   lines.push(`        vpo_real_${c} = (vpo_real_${c}_t)dlsym(RTLD_NEXT, "${c}");`);
   lines.push('    }');
   lines.push(`    ${ret} result = ${mainCall};`);
+  {
+    const ib = inboundBufName(args);
+    if (ib) lines.push(...inboundPostLines(c, ib));
+  }
   lines.push(...envPost);
   if (envPost.length === 0) {
     lines.push(`    ${inVar} = 0;`);

@@ -28,7 +28,37 @@ const SIGN_KEY_PATH = path.join(CONFIG_DIR, '.sign_key');
 const SIG_PATH = path.join(CONFIG_DIR, 'config.sig');
 const CHAIN_LOG = path.join(CONFIG_DIR, 'chain.log');
 const CHAIN_HEAD = path.join(CONFIG_DIR, '.chain_head');
+const LIB_DIR = path.join(CONFIG_DIR, 'lib');
 const SIGN_TTL = Number(process.env.VPO_SIGN_TTL || 30 * 24 * 3600);
+
+function hookLibName() {
+  return process.platform === 'darwin' ? 'libvpo_hook.dylib' : 'libvpo_hook.so';
+}
+
+function hookLibPath() {
+  const name = hookLibName();
+  const candidates = [path.join(HOOK_DIR, name), path.join(LIB_DIR, name)]
+    .filter((p) => fs.existsSync(p))
+    .map((p) => ({ p, mtime: fs.statSync(p).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime);
+  return candidates.length ? candidates[0].p : path.join(LIB_DIR, name);
+}
+
+function writableDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, '.vpo_write_probe');
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+function buildLibDir() {
+  return writableDir(HOOK_DIR) ? HOOK_DIR : LIB_DIR;
+}
 
 // 只匹配 shims 目录本身，不能匹配 /.pyenv/ 整棵子树（否则误伤
 // ~/.pyenv/versions/*/bin/python3 这类真实二进制）。
@@ -57,27 +87,27 @@ function buildHook() {
 
   const gen = path.join(HOOK_DIR, 'gen_wrappers.js');
   const sig = path.join(HOOK_DIR, 'signatures.json');
-  const wrapper = path.join(HOOK_DIR, 'wrapper.c');
   const policy = path.join(HOOK_DIR, 'policy.c');
+  const libDir = buildLibDir();
+  fs.mkdirSync(libDir, { recursive: true });
+  const wrapper = path.join(libDir, 'wrapper.c');
 
   const genPlatform = plat === 'linux' ? 'linux' : 'darwin';
-  const genResult = spawnSync('node', [gen, sig, '-o', wrapper, '-p', genPlatform], {
+  const genResult = spawnSync(process.execPath, [gen, sig, '-o', wrapper, '-p', genPlatform], {
     stdio: 'inherit',
+    cwd: libDir,
   });
   if (genResult.error || genResult.status !== 0) {
     console.error('[vpo-hook] wrapper 生成失败');
     process.exit(1);
   }
 
-  const out =
-    plat === 'darwin'
-      ? path.join(HOOK_DIR, 'libvpo_hook.dylib')
-      : path.join(HOOK_DIR, 'libvpo_hook.so');
+  const out = path.join(libDir, hookLibName());
   const cmd =
     plat === 'darwin'
-      ? [cc, '-dynamiclib', '-o', out, wrapper, policy]
-      : [cc, '-shared', '-fPIC', '-o', out, wrapper, policy, '-ldl'];
-  const buildResult = spawnSync(cmd[0], cmd.slice(1), { stdio: 'inherit', cwd: HOOK_DIR });
+      ? [cc, '-dynamiclib', '-I', HOOK_DIR, '-o', out, wrapper, policy]
+      : [cc, '-shared', '-fPIC', '-I', HOOK_DIR, '-o', out, wrapper, policy, '-ldl'];
+  const buildResult = spawnSync(cmd[0], cmd.slice(1), { stdio: 'inherit', cwd: libDir });
   if (buildResult.error || buildResult.status !== 0) {
     console.error('[vpo-hook] hook 库编译失败');
     process.exit(1);
@@ -606,6 +636,34 @@ function mergeGrantsInto(grants, simpleCfg) {
   return merged;
 }
 
+function promptSync(question) {
+  const r = spawnSync(
+    'bash',
+    ['-c', `read -r -p ${JSON.stringify(question)} ans; echo "$ans"`],
+    { stdio: ['inherit', 'pipe', 'inherit'] },
+  );
+  if (r.status !== 0) return '';
+  return (r.stdout || '').toString().trim().toLowerCase();
+}
+
+function promptFirstRun(root, caps) {
+  const found = CAPABILITY_GROUPS.filter((g) => caps[g].score > 0);
+  console.error(`[vpo-hook] 首次运行，环境根: ${root}`);
+  if (found.length) console.error(`[vpo-hook] 扫描发现能力: ${found.join(', ')}`);
+  const grants = defaultGrants(root);
+  if (caps.network.score > 0) {
+    const ans = promptSync('允许联网（internet，公网 80/443/53）? [y/N] ');
+    if (['y', 'yes'].includes(ans)) grants.network.mode = 'internet';
+  }
+  if (caps.process.score > 0) {
+    const ans = promptSync('允许执行子进程（shell）? [y/N] ');
+    if (['y', 'yes'].includes(ans)) grants.process.exec = 'shell';
+  }
+  saveGrants(root, grants);
+  console.error(`[vpo-hook] 已保存授权: ${grantsPath(root)}`);
+  return grants;
+}
+
 function cmdLog(args) {
   const n = args.find((a) => a === '-n') ? Number(args[args.indexOf('-n') + 1]) : 20;
   const denials = path.join(CONFIG_DIR, 'denials.log');
@@ -934,11 +992,7 @@ function cmdRun(args) {
     return 1;
   }
   const plat = process.platform;
-  const lib = hook
-    ? path.resolve(hook)
-    : (plat === 'darwin'
-      ? path.join(HOOK_DIR, 'libvpo_hook.dylib')
-      : path.join(HOOK_DIR, 'libvpo_hook.so'));
+  const lib = hook ? path.resolve(hook) : hookLibPath();
   if (!fs.existsSync(lib)) {
     console.error('[vpo-hook] hook 库不存在，请先运行: vpo-hook init');
     return 1;
@@ -1017,7 +1071,12 @@ function cmdRun(args) {
         console.error(`[vpo-hook] ${gmsg}，拒绝运行`);
         return 1;
       }
-      const grants = loadGrants(root);
+      const grants0 = loadGrants(root);
+      let grants = grants0;
+      if (grants === null && process.stdin.isTTY && !quiet) {
+        const caps = scanCapabilities(root);
+        grants = promptFirstRun(root, caps);
+      }
       if (grants) simpleCfg = mergeGrantsInto(grants, simpleCfg);
       const extra = [
         ...simpleList(simpleCfg, 'permissions', 'files', 'extra_read'),
@@ -1149,11 +1208,7 @@ function cmdRun(args) {
 }
 
 function cmdStatus() {
-  const plat = process.platform;
-  const lib =
-    plat === 'darwin'
-      ? path.join(HOOK_DIR, 'libvpo_hook.dylib')
-      : path.join(HOOK_DIR, 'libvpo_hook.so');
+  const lib = hookLibPath();
   console.log(`[vpo-hook] 平台: ${process.platform} ${os.arch()}`);
   console.log(`[vpo-hook] hook 库: ${lib} ${fs.existsSync(lib) ? '(存在)' : '(缺失，请 init)'}`);
   console.log(`[vpo-hook] 配置: ${CONFIG_PATH} ${fs.existsSync(CONFIG_PATH) ? '(存在)' : '(缺失)'}`);
