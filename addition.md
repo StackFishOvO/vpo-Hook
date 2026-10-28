@@ -234,14 +234,18 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 
 ---
 
-## 五、给 AI 的工作顺序建议（2026-10-25 更新）
+## 五、给 AI 的工作顺序建议（2026-10-28 更新）
 
-1. **P0-B：`execve` + `posix_spawn`/`posix_spawnp` 环境继承（Linux 已完成，macOS 生成通过、运行待实测）**。从 constructor 缓存构造 envp，不读运行时 `getenv`；生成代码用平台宏保证 Linux/macOS 都能编译运行。`vfork` 改为 `fork`，避免 vfork 子进程 malloc 崩溃。
-2. **小 P0 一批（已修复）**：D（`lang=None` 显式化 + 警告）、E（审计防重入）、V（审计 `enabled` 误判）、L（审计写入原子性）、F（buildHook 退出码）。
-3. **W：验收脚本 + quiet/log 控制（已实现）**：`scripts/verify_linux.sh` + `run -q/-v`，诊断信息走 stderr。
-4. **`scripts/release.py`（已实现）**：`--dry-run` / `--check` / 实际构建；`VERSION` 单一来源，`release/` 已可重复生成。
-5. **YAML（A/G）与配置完整性（AB）**：按用户节奏推进；先定威胁模型，签名优先于加密，不要阻塞上面几步。
-6. **P1/P2/P3**：X（Bun/C 扩展）、J（network_mode 三态）、K（skip_on/noop）、O（预编译库）、P/Q（打包）、Y/Z/AA（双语 SDK、Hook 发现、供应链审计）。
+> 用户已定的开发顺序（2026-10-28）：
+
+1. **L2 信源 enforce**：把 `sources.allow/deny` 真正接到名文 sink 的栈归因（Python/JS），新装包默认受限。
+2. **简单/复杂配置模板 + CLI `discover/generate`**：基于信源 + 现有能力做官方模板和终端子命令。
+3. **预编译 fallback（O）**：待定（WSL Docker 不确定；可能开两个版本 WSL 或在主系统跑 Docker，或用 GitHub Actions）。
+4. **macOS 回归**：排在 raw call 之前，用实机跑本次新增路径。
+5. **YAML 重构（A/G）**：清理手写解析器。
+6. **L3/L4 先出技术文档**：单独一个 `.md`（见 `L3-L4.md`），不写代码。
+7. **TUI 最后做**：作为简单安全组的一部分；复杂组不用 TUI；TUI 尽量适配 shell 大小。
+8. **raw call / L4 实现**：在 macOS 回归之后、TUI 之前。
 
 **不要跳步**。不要先做“弹窗”“AI 生成配置”“策略包签名”这些上层功能，因为底层 bug 没修时，上层功能会建立在不可靠的基础上。**先让当前代码“对”，再让它“好用”**。
 
