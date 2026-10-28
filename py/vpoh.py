@@ -126,7 +126,7 @@ def discover(target) -> dict:
             if f.suffix in native_exts:
                 symbols.extend(vpo_hook._nm_undefined(f))
         if name:
-            r = _reflect_python(name, str(root))
+            r = _reflect_python(name, str(root.parent))
             manifest["apis"]["python"] = r.get("attrs", [])
             manifest["deps"] = r.get("deps", [])
     elif not p.exists():

@@ -309,6 +309,13 @@ else
   echo "SKIP node native addon (node-gyp 未安装)"
 fi
 
+section "SDK discover/generate"
+out=$(bash test/sdk_test/run.sh 2>&1)
+rc=$?
+printf '%s\n' "$out"
+check_status "SDK test exit" 0 "$rc"
+check_contains "SDK test result" "SDK test OK" "$out"
+
 section "release sync"
 out=$(python3 scripts/release.py --check 2>&1)
 rc=$?

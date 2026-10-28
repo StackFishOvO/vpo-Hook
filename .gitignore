@@ -21,6 +21,8 @@ yarn-error.log*
 wrapper.c
 libvpo_hook.so
 libvpo_hook.dylib
+libvpo_*.so
+.vpo/
 *.o
 *.a
 
