@@ -471,6 +471,8 @@ VPO_INBOUND_ACTION        audit | block
 
 ### 6.11 信源（L2）与 Hook 发现（Z）的定位（2026-10-27 决策）
 
+> **L2 实现状态（2026-10-28）**：已实现 deny-only 信源 enforce（Python + JS）。名文层在进程/网络 sink 上做栈归因到包，命中 `VPO_SOURCES_DENY` 的包被拒，其余放行（未知=audit 不拒，二进制层粗粒度兜底）。Python：`sitecustomize._install_sources`（`os.popen/fork/exec*/spawn*/posix_spawn*`、`subprocess.call/check_*`、`socket.create_connection/connect`）；JS：`preload.installSources`（`child_process.exec/spawn/fork/execFile*`、`net.connect/createConnection`、`dns.*`、`http(s).request/get`）。
+
 - **L2 信源放简单安全组**：重点场景是刚 `npm/pip install` 新包时，用包级来源（包名/版本/hash）做约束；后续再决定是否上对象级 taint。
 - **Z 与 L2 合并做**：不做“无保护跑一遍真实 app”的动态观察（会直接漏完），改用**静态符号提取**：
   - 用户给一个 obj / namespace 当参数

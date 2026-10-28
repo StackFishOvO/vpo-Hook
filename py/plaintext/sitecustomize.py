@@ -16,12 +16,84 @@ import os
 import sys
 import time
 import traceback
+from pathlib import Path
 
 from interpose import CapabilityDenied, Interposer, Policy
 
 __all__ = ["CapabilityDenied", "Interposer", "Policy"]
 
 QUIET = os.environ.get("VPO_HOOK_QUIET") == "1"
+
+# L2 信源：仅“显式进入 deny 才拒绝”，未知/allow 一律放行（粗粒度兜底在二进制层）
+_SOURCES_DENY = set(
+    x.strip() for x in os.environ.get("VPO_SOURCES_DENY", "").split(",") if x.strip()
+)
+
+
+def _package_of(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    parts = Path(filename).parts
+    for marker in ("site-packages", "dist-packages"):
+        if marker in parts:
+            idx = parts.index(marker)
+            if idx + 1 < len(parts):
+                top = parts[idx + 1]
+                return top[:-3] if top.endswith(".py") else top
+            return None
+    return None
+
+
+def _caller_package() -> str | None:
+    frame = sys._getframe(1)
+    while frame is not None:
+        fname = frame.f_code.co_filename
+        if "interpose.py" in fname or "sitecustomize.py" in fname:
+            frame = frame.f_back
+            continue
+        pkg = _package_of(fname)
+        if pkg:
+            return pkg
+        frame = frame.f_back
+    return None
+
+
+def _install_sources() -> None:
+    """L2 信源：命中 sources.deny 的包，其进程/网络出口被拒；其余放行。"""
+    if not _SOURCES_DENY:
+        return
+
+    def policy(cap, args, kwargs):
+        pkg = _caller_package()
+        if pkg and (pkg in _SOURCES_DENY or any(pkg == d or pkg.startswith(d + ".") for d in _SOURCES_DENY)):
+            return Policy.DENY
+        return Policy.ALLOW
+
+    sinks = [
+        ("os", "popen"), ("os", "fork"),
+        ("os", "execv"), ("os", "execve"), ("os", "execvp"), ("os", "execvpe"),
+        ("os", "spawnl"), ("os", "spawnlp"), ("os", "spawnv"), ("os", "spawnvp"),
+        ("os", "posix_spawn"), ("os", "posix_spawnp"),
+        ("subprocess", "call"), ("subprocess", "check_call"),
+        ("subprocess", "check_output"), ("subprocess", "getoutput"),
+        ("subprocess", "getstatusoutput"),
+        ("socket", "create_connection"), ("socket", "connect"),
+    ]
+    guard = Interposer(default_policy=Policy.ALLOW)
+    installed = []
+    for mod_name, attr in sinks:
+        try:
+            module = importlib.import_module(mod_name)
+            if hasattr(module, attr):
+                guard.bind(module, attr, f"{mod_name}.{attr}", policy=policy)
+                installed.append(f"{mod_name}.{attr}")
+        except Exception:
+            continue
+    guard.seal()
+    if installed and not QUIET:
+        sys.stderr.write(
+            f"[vpo-sources] 已安装 {len(installed)} 个信源 hook（deny: {', '.join(sorted(_SOURCES_DENY))}）\n"
+        )
 
 
 def _install() -> None:
@@ -133,4 +205,5 @@ def _install_audit() -> None:
 
 
 _install()
+_install_sources()
 _install_audit()

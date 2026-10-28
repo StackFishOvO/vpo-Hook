@@ -21,6 +21,74 @@ const { Interposer, Policy } = require('./interpose');
 
 const QUIET = process.env.VPO_HOOK_QUIET === '1';
 
+// L2 信源：仅显式进入 deny 才拒绝
+const SOURCES_DENY = (process.env.VPO_SOURCES_DENY || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function packageOf(filename) {
+  if (!filename) return null;
+  const i = filename.indexOf('node_modules');
+  if (i < 0) return null;
+  const rest = filename.slice(i + 'node_modules'.length + 1);
+  const parts = rest.split('/');
+  return parts[0] === '@' ? parts.slice(0, 2).join('/') : parts[0];
+}
+
+function callerPackage() {
+  const stack = (new Error().stack || '').split('\n').slice(1);
+  for (const line of stack) {
+    let m = line.match(/\((.*):\d+:\d+\)$/);
+    if (!m) m = line.match(/at (.*):\d+:\d+$/);
+    if (!m) continue;
+    const file = m[1];
+    if (/preload\.js|interpose\.js/.test(file)) continue;
+    const pkg = packageOf(file);
+    if (pkg) return pkg;
+  }
+  return null;
+}
+
+function installSources() {
+  if (SOURCES_DENY.length === 0) return;
+
+  const policy = () => {
+    const pkg = callerPackage();
+    if (pkg && SOURCES_DENY.some((d) => pkg === d || pkg.startsWith(d + '/'))) {
+      return Policy.DENY;
+    }
+    return Policy.ALLOW;
+  };
+
+  const sinks = [
+    ['child_process', 'exec'], ['child_process', 'spawn'],
+    ['child_process', 'fork'], ['child_process', 'execFile'],
+    ['child_process', 'execFileSync'],
+    ['net', 'connect'], ['net', 'createConnection'],
+    ['dns', 'lookup'], ['dns', 'resolve'], ['dns', 'resolve4'], ['dns', 'resolve6'],
+    ['http', 'request'], ['http', 'get'], ['https', 'request'], ['https', 'get'],
+  ];
+  const guard = new Interposer({ defaultPolicy: Policy.ALLOW });
+  let installed = 0;
+  for (const [modName, name] of sinks) {
+    try {
+      const mod = require(modName);
+      if (typeof mod[name] === 'function') {
+        guard.bind(mod, name, `${modName}.${name}`, { policy });
+        installed++;
+      }
+    } catch (_e) {
+      // 模块/属性不存在：跳过
+    }
+  }
+  guard.seal();
+
+  if (installed && !QUIET) {
+    console.error(`[vpo-sources] 已安装 ${installed} 个信源 hook（deny: ${SOURCES_DENY.join(', ')}）`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 名文 hook（拦截）
 // ---------------------------------------------------------------------------
@@ -134,4 +202,5 @@ function installAudit() {
 }
 
 installPlaintext();
+installSources();
 installAudit();
