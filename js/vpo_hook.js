@@ -253,7 +253,10 @@ function parseSimpleYaml(text) {
     }
     if (stripped.includes(':')) {
       const idx = stripped.indexOf(':');
-      const key = stripped.slice(0, idx).trim();
+      let key = stripped.slice(0, idx).trim();
+      if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
+        key = key.slice(1, -1);
+      }
       let val = stripped.slice(idx + 1).split('#')[0].trim();
       let child;
       if (val === '') {
@@ -301,6 +304,24 @@ function simpleList(node, ...keys) {
   if (Array.isArray(v)) return v.filter((x) => typeof x === 'string' && x);
   if (typeof v === 'string' && v) return [v];
   return [];
+}
+
+function cfgList(cfg, ...keys) {
+  return simpleList(cfg, ...keys);
+}
+
+function cfgMap(cfg, ...keys) {
+  const v = simpleGet(cfg, ...keys);
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+}
+
+function cfgAudit(cfg, lang) {
+  const a = cfg.audit;
+  if (!a || typeof a !== 'object' || Array.isArray(a)) return { enabled: false, log: '', classes: [] };
+  const enabled = ['true', 'yes', 'on', '1'].includes(String(a.enabled || '').trim().toLowerCase());
+  const log = a.log || '';
+  const classes = lang ? cfgList(a, 'classes', lang) : [];
+  return { enabled, log, classes };
 }
 
 const RUNTIME_DIRS = [
@@ -940,7 +961,9 @@ function cmdRun(args) {
     }
   }
 
-  const denyPaths = configText ? parseDenyPaths(configText) : [];
+  const cfg = configText ? parseSimpleYaml(configText) : {};
+
+  const denyPaths = cfgList(cfg, 'policy', 'deny_paths');
   if (denyPaths.length) {
     log(`[vpo-hook] deny_paths: ${denyPaths.map(expandHome).join(':')}`);
   }
@@ -951,20 +974,17 @@ function cmdRun(args) {
       stdio: quiet ? ['ignore', 'ignore', 'inherit'] : 'inherit',
     });
   }
-  const honeypotMap = configText ? parseHoneypotMap(configText) : {};
-  const allowNetwork = configText ? parseYamlList(configText, 'allow_network') : [];
-  const riskMarkers = configText ? parseYamlList(configText, 'high_risk_markers') : [];
+  const honeypotMap = cfgMap(cfg, 'policy', 'honeypot_map');
+  const allowNetwork = cfgList(cfg, 'policy', 'allow_network');
+  const riskMarkers = cfgList(cfg, 'policy', 'high_risk_markers');
 
   const real = resolveExecutable(args[0]);
   const base = path.basename(real);
   const lang = base.includes('python') ? 'python' : base.includes('node') ? 'js' : null;
 
   let simpleCfg = null;
-  if (configText) {
-    const parsed = parseSimpleYaml(configText);
-    if (simpleScalar(parsed, '', 'profile') === 'simple' && 'permissions' in parsed) {
-      simpleCfg = parsed;
-    }
+  if (cfg.profile === 'simple' && 'permissions' in cfg) {
+    simpleCfg = cfg;
   }
 
   const env = { ...process.env };
@@ -1052,7 +1072,7 @@ function cmdRun(args) {
 
   if (configText) {
     if (lang === 'python') {
-      const apis = parsePlaintextApis(configText, 'python');
+      const apis = cfgList(cfg, 'plaintext', 'python');
       if (apis.length) {
         if (!fs.existsSync(path.join(PY_PLAINTEXT, 'sitecustomize.py'))) {
           console.error('[vpo-hook] 缺少 sitecustomize.py（打包不完整）');
@@ -1064,7 +1084,7 @@ function cmdRun(args) {
         log(`[vpo-hook] 名文 hook(python): ${apis.join(', ')}`);
       }
     } else if (lang === 'js') {
-      const apis = parsePlaintextApis(configText, 'js');
+      const apis = cfgList(cfg, 'plaintext', 'js');
       if (apis.length) {
         const preload = path.join(JS_PLAINTEXT, 'preload.js');
         if (!fs.existsSync(preload)) {
@@ -1080,7 +1100,7 @@ function cmdRun(args) {
   }
 
   if (configText) {
-    const audit = parseAudit(configText, lang);
+    const audit = cfgAudit(cfg, lang);
     if (audit.enabled && !lang) {
       log('[vpo-hook] 目标不是 Python/Node，审计未启用');
     } else if (audit.enabled && audit.classes.length) {

@@ -298,6 +298,8 @@ def parse_simple_yaml(text: str) -> dict:
         if ":" in stripped:
             key, val = stripped.split(":", 1)
             key = key.strip()
+            if (key.startswith('"') and key.endswith('"')) or (key.startswith("'") and key.endswith("'")):
+                key = key[1:-1]
             val = val.split("#", 1)[0].strip()
             if val == "":
                 # 看下一行判断是 list 还是 dict
@@ -346,6 +348,25 @@ def simple_list(node, *keys):
     if isinstance(v, str) and v:
         return [v]
     return []
+
+
+def _cfg_list(cfg: dict, *keys) -> list[str]:
+    return simple_list(cfg, *keys)
+
+
+def _cfg_map(cfg: dict, *keys) -> dict:
+    v = _simple_get(cfg, *keys)
+    return v if isinstance(v, dict) else {}
+
+
+def _cfg_audit(cfg: dict, lang: str | None) -> tuple[bool, str, list[str]]:
+    a = cfg.get("audit")
+    if not isinstance(a, dict):
+        return False, "", []
+    enabled = str(a.get("enabled", "")).strip().lower() in ("true", "yes", "on", "1")
+    log_path = a.get("log", "")
+    classes = _cfg_list(a, "classes", lang) if lang else []
+    return enabled, log_path, classes
 
 
 def detect_env_root(real: str, lang: str | None) -> Path | None:
@@ -1166,7 +1187,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"[vpo-hook] {msg}，拒绝运行", file=sys.stderr)
             return 1
 
-    deny_paths = parse_deny_paths(config_text) if config_text else []
+    cfg = parse_simple_yaml(config_text) if config_text else {}
+
+    deny_paths = _cfg_list(cfg, "policy", "deny_paths")
     if deny_paths:
         log(f"[vpo-hook] deny_paths: {':'.join(expand_home(p) for p in deny_paths)}")
 
@@ -1179,11 +1202,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         subprocess.run([sys.executable, str(honeypot_script)], **honeypot_kwargs)
 
     # 解析 rewrite 映射（deny 路径 -> 蜜罐路径）
-    honeypot_map = parse_honeypot_map(config_text) if config_text else {}
+    honeypot_map = _cfg_map(cfg, "policy", "honeypot_map")
 
     # 解析网络白名单和高危数据标记
-    allow_network = parse_yaml_list(config_text, "allow_network") if config_text else []
-    risk_markers = parse_yaml_list(config_text, "high_risk_markers") if config_text else []
+    allow_network = _cfg_list(cfg, "policy", "allow_network")
+    risk_markers = _cfg_list(cfg, "policy", "high_risk_markers")
 
     # 解析真实路径（跳过 shim）
     real = resolve_executable(args.cmd[0])
@@ -1192,10 +1215,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # 简单安全组：只有 profile: simple 且带 permissions 块才启用（旧配置兼容）
     simple_cfg = None
-    if config_text:
-        _parsed = parse_simple_yaml(config_text)
-        if simple_scalar(_parsed, "", "profile") == "simple" and "permissions" in _parsed:
-            simple_cfg = _parsed
+    if cfg.get("profile") == "simple" and "permissions" in cfg:
+        simple_cfg = cfg
 
     # 设置注入环境变量（二进制 hook）
     env = dict(os.environ)
@@ -1294,7 +1315,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 名文 hook 注入（接口级，按目标语言）
     if config_text:
         if lang == "python":
-            apis = parse_plaintext_apis(config_text, "python")
+            apis = _cfg_list(cfg, "plaintext", "python")
             if apis:
                 if not (HERE / "plaintext" / "sitecustomize.py").exists():
                     print("[vpo-hook] 缺少 plaintext/sitecustomize.py（打包不完整）", file=sys.stderr)
@@ -1305,7 +1326,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 env["PYTHONPATH"] = str(HERE / "plaintext") + (":" + pp if pp else "")
                 log(f"[vpo-hook] 名文 hook(python): {', '.join(apis)}")
         elif lang == "js":
-            apis = parse_plaintext_apis(config_text, "js")
+            apis = _cfg_list(cfg, "plaintext", "js")
             if apis:
                 preload = HERE / "js_plaintext" / "preload.js"
                 if not preload.exists():
@@ -1319,7 +1340,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # 对象创建审计注入（默认关闭，只记录调用链）
     if config_text:
-        audit_enabled, audit_log, audit_classes = parse_audit(config_text, lang)
+        audit_enabled, audit_log, audit_classes = _cfg_audit(cfg, lang)
         if audit_enabled and lang is None:
             log("[vpo-hook] 目标不是 Python/Node，审计未启用")
         elif audit_enabled and audit_classes:

@@ -47,9 +47,9 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 
 ### P0（本周修，影响功能/安全）
 
-**A. 手写 YAML 解析器是最大技术债（保留 YAML，重构待定）**
+**A. 手写 YAML 解析器是最大技术债（已统一，保留 YAML）**
 - **问题**：`vpo_hook.py`/`cli.py` 有 `parse_deny_paths`、`parse_yaml_list`、`parse_honeypot_map`、`parse_audit`、`parse_plaintext_apis` 五个手写解析器，各写各的，假设 block style、缩进、分隔符。用户写 flow style、多行字符串、锚点引用全挂。
-- **2026-10-25 决策**：**保留 YAML**，因为它要同时服务“简单安全组”和“复杂安全组”两套配置；不盲目换格式。后续仍应引入 `pyyaml`/`js-yaml`（或自写但更完整的解析）以支持 flow/anchors，但要和配置签名/审计链一起设计；G 随 A 解决。当前先保证默认配置和简单组可用，不阻塞发布工程。
+- **2026-10-28 已做**：用**自研极简 YAML 子集解析器**（`parse_simple_yaml`/`parseSimpleYaml`）统一，`cmd_run` 全部改为从解析后的 dict 取（`_cfg_list/_cfg_map/_cfg_audit` / `cfgList/cfgMap/cfgAudit`），不再用五个 trim 式解析器；顺带修了 key 引号（`honeypot_map` 的 `"/etc/passwd"` → `/etc/passwd`，即 G）。**没有引入 pyyaml/js-yaml**，保持启动器单文件零依赖；flow style/anchors 仍不支持（我们的模板都是 block style）。旧解析器函数暂时保留为死代码，后续清理。
 
 **B. `execve` 子进程环境继承（安全洞）（Linux 已修复；macOS 基线已跑通，新增路径待回归）**
 - **问题**：`execve`/`execv`/`execvp` 的 wrapper 只检查 `pathname`，没把 VPO 环境变量注入子进程 `envp`。已实测 `os.execve(..., {})` 和 `subprocess.Popen(..., env={})` 都能让子进程读到真实 `/etc/passwd`。
@@ -77,7 +77,7 @@ VPO-Hook 是一个**桌面 Node.js / Python 运行时**的**接口级 + 出口�
 - **问题**：`gen_wrappers.js` 或编译失败时，`buildHook` 继续往下走，`cmdInit` 打印“自检失败”但退出码 0，CI 误判成功。
 - **修法**：检查 `spawnSync(...).status`，非零则 `process.exit(1)`。Python 版用 `check=True` 是对的，保持。
 
-**G. `parse_honeypot_map` 的冒号分割**
+**G. `parse_honeypot_map` 的冒号分割（已修复）**
 - **问题**：`partition(":")` / `indexOf(':')` 找第一个冒号，路径含冒号会截错。
 - **修法**：pyyaml 重构（A）一并解决。
 
