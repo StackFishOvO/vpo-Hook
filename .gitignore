@@ -54,3 +54,4 @@ test/cve-2026-106069/cert.pem
 .env
 .env.*
 !.env.example
+*.tgz

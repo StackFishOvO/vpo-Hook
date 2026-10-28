@@ -29,10 +29,12 @@ VERSION_FILE = ROOT / "VERSION"
 # transform: None | "python_launcher" | "js_launcher"
 MAPPINGS: list[tuple[str, str, str | None]] = [
     ("py/vpo_hook.py", "release/py/vpohook/cli.py", "python_launcher"),
+    ("py/vpoh.py", "release/py/vpoh.py", None),
     ("py/obj_hook", "release/py/vpohook/obj_hook", None),
     ("py/plaintext", "release/py/vpohook/plaintext", None),
     ("js/plaintext", "release/py/vpohook/js_plaintext", None),
     ("js/vpo_hook.js", "release/js/vpo_hook.js", "js_launcher"),
+    ("js/vpoh.js", "release/js/vpoh.js", None),
     ("js/obj_hook", "release/js/obj_hook", None),
     ("js/plaintext", "release/js/plaintext", None),
     ("py/plaintext", "release/js/py_plaintext", None),

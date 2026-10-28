@@ -8,6 +8,7 @@ setup(
     "让用户安全运行未经验证的 npm / pip 包。",
     author="VPO-Hook",
     packages=find_packages(),
+    py_modules=["vpoh"],
     include_package_data=True,
     package_data={
         "vpohook": [

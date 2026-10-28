@@ -17,7 +17,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-import vpo_hook
+try:
+    import vpo_hook
+except ImportError:  # 安装后的包：CLI 在 vpohook.cli
+    import vpohook.cli as vpo_hook
 
 
 def _main(args) -> int:
