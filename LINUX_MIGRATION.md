@@ -11,7 +11,7 @@
 | 注入机制 | `DYLD_INSERT_LIBRARIES` | `LD_PRELOAD` |
 | 拦截方式 | `DYLD_INTERPOSE` 段 | **同名符号**（直接定义 `open()` 覆盖 libc） |
 | 获取真实函数 | `dlsym` 被 interpose 劫持，绕道 `__open`/`$NOCANCEL` | **`dlsym(RTLD_NEXT, "open")` 直接可用** |
-| 可拦函数 | 19 个（12 个受限） | **35 个 wrapper**（31 个基础函数 + `open64`/`openat64`/`fopen`/`fopen64` 4 个 LFS 别名） |
+| 可拦函数 | 19 个（12 个受限） | **36 个 wrapper**（32 个基础函数 + `open64`/`openat64`/`fopen`/`fopen64` 4 个 LFS 别名） |
 
 **核心结论**：Linux 的机制比 macOS 简单得多——不需要 `__` 私有符号、`$NOCANCEL` 变体、`MACOS_SKIP` 这一整套 hack。
 
@@ -66,7 +66,7 @@ cd vpoh
 python3 py/vpo_hook.py init        # 会生成 Linux 版 wrapper.c + 编译 libvpo_hook.so
 ```
 
-预期看到 `gen_wrappers: 已生成 35 个 wrapper (Linux) -> ...`（35 = 31 基础 + 4 个 LFS 别名，
+预期看到 `gen_wrappers: 已生成 36 个 wrapper (Linux) -> ...`（36 = 32 基础 + 4 个 LFS 别名，
 macOS 仍是 19 个）。
 
 ### 4. 跑通拦截（对照 macOS 那套测试）

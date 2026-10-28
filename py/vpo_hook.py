@@ -1163,7 +1163,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if plat is None:
         raise SystemExit(f"[vpo-hook] 不支持的平台: {platform.system()}")
 
-    lib = HOOK_DIR / ("libvpo_hook.dylib" if plat == "darwin" else "libvpo_hook.so")
+    hook = getattr(args, "hook", None)
+    if hook:
+        lib = Path(hook)
+        if not lib.exists():
+            print(f"[vpo-hook] 指定的 hook 库不存在: {hook}", file=sys.stderr)
+            return 1
+    else:
+        lib = HOOK_DIR / ("libvpo_hook.dylib" if plat == "darwin" else "libvpo_hook.so")
     if not lib.exists():
         print("[vpo-hook] hook 库不存在，请先运行: vpo-hook init", file=sys.stderr)
         return 1
@@ -1409,6 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="注入 hook 并运行目标进程")
     r.add_argument("-q", "--quiet", action="store_true", help="不输出启动器诊断信息")
     r.add_argument("-v", "--verbose", action="store_true", help="输出详细诊断信息")
+    r.add_argument("-H", "--hook", default=None, help="使用指定的 hook 库（复杂组定制，如 libvpo_<pkg>.so）")
     r.add_argument("cmd", nargs=argparse.REMAINDER, help="目标命令及其参数")
     sub.add_parser("status", help="显示当前状态")
     sc = sub.add_parser("scan", help="扫描目录/文件的能力清单")

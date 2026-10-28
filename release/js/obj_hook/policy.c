@@ -23,6 +23,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/uio.h>
 
 #if defined(__APPLE__)
 #define VPO_PRELOAD_KEY "DYLD_INSERT_LIBRARIES"
@@ -55,6 +56,7 @@ static char **exec_allow = NULL;      /* VPO_EXEC_ALLOW：可执行文件 */
 static size_t exec_allow_count = 0;
 static int network_mode = -1;         /* -1 旧行为, 0 off, 1 internet, 2 allowlist */
 static int exec_mode = -1;            /* -1 旧行为, 0 off, 1 allowlist, 2 shell */
+static int data_mode = 0;             /* 0 block（默认拒绝）, 1 honeypot（外发数据重写成蜜罐） */
 
 /* 拒绝审计：绕过自身 wrapper，用真实 open/write 追加到 denials.log */
 static int denials_fd = -1;
@@ -370,6 +372,8 @@ static void load_policy(void) {
         else if (strcmp(em, "allowlist") == 0) exec_mode = 1;
         else if (strcmp(em, "shell") == 0) exec_mode = 2;
     }
+    const char *dm = getenv("VPO_DATA_MODE");
+    if (dm && strcmp(dm, "honeypot") == 0) data_mode = 1;
 
     /* rewrite 映射：deny=蜜罐，冒号分隔 */
     const char *raw_map = getenv("VPO_REWRITE_MAP");
@@ -542,6 +546,69 @@ static int buffer_has_marker(const void *buf, size_t buflen) {
     return 0;
 }
 
+/* 把 buffer 里的敏感标记替换成 HONEYPOT，输出到 out（最多 out_cap-1 字节，\0 结尾）。 */
+static void redact_buffer(const void *buf, size_t buflen, char *out, size_t out_cap, size_t *out_len) {
+    const char *p = (const char *)buf;
+    size_t o = 0;
+    size_t i = 0;
+    while (i < buflen && o + 1 < out_cap) {
+        int matched = 0;
+        for (size_t m = 0; m < risk_count; m++) {
+            size_t ml = strlen(risk_markers[m]);
+            if (ml == 0 || i + ml > buflen) continue;
+            if (memcmp(p + i, risk_markers[m], ml) == 0) {
+                const char *hp = "HONEYPOT";
+                size_t hl = strlen(hp);
+                if (o + hl >= out_cap) break;
+                memcpy(out + o, hp, hl);
+                o += hl;
+                i += ml;
+                matched = 1;
+                break;
+            }
+        }
+        if (!matched) {
+            out[o++] = p[i++];
+        }
+    }
+    out[o] = '\0';
+    *out_len = o;
+}
+
+/* 就地脱敏：把 buffer 里的敏感标记逐字节替换成 "HONEYPOT"（重复/截断到标记长度，保持总长度不变）。 */
+static void redact_inplace(char *p, size_t buflen) {
+    const char *hp = "HONEYPOT";
+    size_t hl = strlen(hp);
+    size_t i = 0;
+    while (i < buflen) {
+        int matched = 0;
+        for (size_t m = 0; m < risk_count; m++) {
+            size_t ml = strlen(risk_markers[m]);
+            if (ml == 0 || i + ml > buflen) continue;
+            if (memcmp(p + i, risk_markers[m], ml) == 0) {
+                for (size_t k = 0; k < ml; k++) p[i + k] = hp[k % hl];
+                i += ml;
+                matched = 1;
+                break;
+            }
+        }
+        if (!matched) i++;
+    }
+}
+
+static int iovec_has_marker(const struct iovec *iov, int cnt) {
+    for (int i = 0; i < cnt; i++) {
+        if (buffer_has_marker(iov[i].iov_base, iov[i].iov_len)) return 1;
+    }
+    return 0;
+}
+
+static void redact_iovec(struct iovec *iov, int cnt) {
+    for (int i = 0; i < cnt; i++) {
+        redact_inplace((char *)iov[i].iov_base, iov[i].iov_len);
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * 入口
  * ------------------------------------------------------------------------- */
@@ -628,8 +695,24 @@ int vpo_check(const char *func, void *args, vpo_action *action) {
         action->allow = 0;
     }
     /* 数据标记检查：跳过 stdout/stderr(fd<=2)，只拦写文件/写网络等真正外泄 */
-    if (a->buf && a->fd > 2 && buffer_has_marker(a->buf, a->buflen)) {
-        action->allow = 0;
+    if (a->buf && a->fd > 2) {
+        int has = a->iovec
+            ? iovec_has_marker((const struct iovec *)a->buf, (int)a->buflen)
+            : buffer_has_marker(a->buf, a->buflen);
+        if (has) {
+            if (data_mode == 1) {
+                if (a->iovec) {
+                    redact_iovec((struct iovec *)a->buf, (int)a->buflen);
+                } else {
+                    size_t olen = 0;
+                    redact_buffer(a->buf, a->buflen, action->data_buf, sizeof(action->data_buf), &olen);
+                    action->data_rewrite = action->data_buf;
+                    action->data_rewrite_len = olen;
+                }
+            } else {
+                action->allow = 0;
+            }
+        }
     }
     if (!action->allow) {
         log_denial(func, a->path);

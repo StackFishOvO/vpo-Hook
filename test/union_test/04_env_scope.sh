@@ -40,4 +40,9 @@ HOME="$SIMPLE_HOME" python3 py/vpo_hook.py run -q python3 -c "open('$TMP/leak.tx
 size=$(stat -c%s "$TMP/leak.txt" 2>/dev/null || echo missing)
 [ "$size" = "0" ] && ok "写敏感标记被拦（0 字节）" || bad "写敏感标记未被拦（$size 字节）"
 
+# 蜜罐模式：写敏感数据 -> 内容被替换成 HONEYPOT
+rm -f "$TMP/hp.txt"
+VPO_DATA_MODE=honeypot HOME="$SIMPLE_HOME" python3 py/vpo_hook.py run -q python3 -c "open('$TMP/hp.txt','w').write('my password 123')" </dev/null >/dev/null 2>&1
+contains "蜜罐模式写被替换" "HONEYPOT" "$(cat "$TMP/hp.txt" 2>/dev/null)"
+
 end

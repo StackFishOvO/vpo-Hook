@@ -32,9 +32,10 @@ function revoke(root) { return hook.dispatch(['revoke', '--root', String(root)])
 function listGrants() { return hook.dispatch(['list']); }
 function sign() { return hook.dispatch(['sign']); }
 function chain() { return hook.dispatch(['chain']); }
-function run(cmd, quiet = true) {
+function run(cmd, quiet = true, hookLib = null) {
   const argv = ['run'];
   if (quiet) argv.push('-q');
+  if (hookLib) argv.push('--hook', String(hookLib));
   return hook.dispatch(argv.concat(cmd.map(String)));
 }
 

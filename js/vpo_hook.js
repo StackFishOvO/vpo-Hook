@@ -917,8 +917,10 @@ function resolveExecutable(cmd) {
 function cmdRun(args) {
   let quiet = process.env.VPO_HOOK_QUIET === '1';
   let verbose = process.env.VPO_HOOK_VERBOSE === '1';
-  while (args.length && ['-q', '--quiet', '-v', '--verbose'].includes(args[0])) {
+  let hook = null;
+  while (args.length && ['-q', '--quiet', '-v', '--verbose', '-H', '--hook'].includes(args[0])) {
     if (args[0] === '-q' || args[0] === '--quiet') quiet = true;
+    else if (args[0] === '-H' || args[0] === '--hook') { hook = args[1]; args.shift(); }
     else verbose = true;
     args.shift();
   }
@@ -928,14 +930,15 @@ function cmdRun(args) {
   };
 
   if (args.length === 0) {
-    console.error('[vpo-hook] 用法: vpo-hook run [-q|-v] <command...>');
+    console.error('[vpo-hook] 用法: vpo-hook run [-q|-v] [-H <hook库>] <command...>');
     return 1;
   }
   const plat = process.platform;
-  const lib =
-    plat === 'darwin'
+  const lib = hook
+    ? path.resolve(hook)
+    : (plat === 'darwin'
       ? path.join(HOOK_DIR, 'libvpo_hook.dylib')
-      : path.join(HOOK_DIR, 'libvpo_hook.so');
+      : path.join(HOOK_DIR, 'libvpo_hook.so'));
   if (!fs.existsSync(lib)) {
     console.error('[vpo-hook] hook 库不存在，请先运行: vpo-hook init');
     return 1;

@@ -501,5 +501,7 @@ VPO_INBOUND_ACTION        audit | block
 - **两语言**：SDK `import vpoh` / `require('vpoh')`，同名 API，共享同一 `manifest.json`。
 
 > **实现状态（SDK 骨架）**：已实现 `py/vpoh.py` + `js/vpoh.js`，暴露 `discover`（反射候选面 + `nm -u`）/ `generate`（与 signatures 求交 → `gen_wrappers --only` subset → 编译 `libvpo_<pkg>.so`）/ `run` + `init/status/scan/log/grant/revoke/list/sign/chain` 薄封装。生成器（py/js）支持 `--only` subset，输出逐字节一致。新增官方 `config.simple.yaml` 模板 + `init --profile simple|complex` + CLI `discover/generate` 子命令（两语言）。SDK 打包进 wheel/npm 仍待 P3。
+>
+> **外发蜜罐（写蜜罐/canary，复杂组）**：`VPO_DATA_MODE=honeypot` 时，`send/sendto/write/writev` 出口的敏感标记被**就地替换成 HONEYPOT**（长度不变）；默认仍是 `block`。`vpo-hook run -H/--hook <libvpo_<pkg>.so>` 加载定制 hook（`vpoh.run(..., hook=...)` 透传）。新增 `writev` 签名（Linux，Node 用 writev 发 HTTP）。demo：`example/servers/{demo_server.py,js}` + `example/ops/{hook_server.py,js}`，浏览器访问 `/send?msg=my+password+123` 会看到 `HONEYPOT`。
 
 ---

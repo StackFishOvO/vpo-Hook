@@ -59,6 +59,16 @@
         { "name": "count", "type": "size_t" }
       ]
     },
+    "writev": {
+      "signature": "ssize_t writev(int fd, const struct iovec *iov, int iovcnt)",
+      "category": "io",
+      "platforms": ["linux"],
+      "args": [
+        { "name": "fd", "type": "int" },
+        { "name": "iov", "type": "const struct iovec *", "check": "iovec" },
+        { "name": "iovcnt", "type": "int" }
+      ]
+    },
     "unlink": {
       "signature": "int unlink(const char *pathname)",
       "category": "io",

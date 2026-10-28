@@ -64,6 +64,7 @@ const HEADER = String.raw`/* 自动生成，请勿手改。来源: signatures.js
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <signal.h>
 #include <spawn.h>
 
@@ -102,6 +103,7 @@ const LINUX_HEADER = String.raw`/* 自动生成，请勿手改。来源: signatu
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <signal.h>
 #include <spawn.h>
 
@@ -154,6 +156,11 @@ function genArgsPacking(args) {
       lines.push(`    vargs.buf = ${a.name};`);
       if (nxt) lines.push(`    vargs.buflen = ${nxt.name};`);
       if (args.length) lines.push(`    vargs.fd = ${args[0].name};`);
+    } else if (a.check === 'iovec') {
+      lines.push(`    vargs.buf = ${a.name};`);
+      if (nxt) lines.push(`    vargs.buflen = ${nxt.name};`);
+      if (args.length) lines.push(`    vargs.fd = ${args[0].name};`);
+      lines.push('    vargs.iovec = 1;');
     }
   }
   return lines;
@@ -196,6 +203,22 @@ function envModeParts(meta, argNames, variadic, denyRet, inVar) {
 
   const callNames = variadic ? [...names, 'mode'] : names;
   return { pre, callArgs: callNames.join(', '), post };
+}
+
+function dataRewriteLines(args) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i].check === 'buffer' && i + 1 < args.length) {
+      const buf = args[i].name;
+      const length = args[i + 1].name;
+      return [
+        '    if (action.data_rewrite) {',
+        `        ${buf} = action.data_rewrite;`,
+        `        ${length} = action.data_rewrite_len;`,
+        '    }',
+      ];
+    }
+  }
+  return [];
 }
 
 function genStaticWrapper(name, meta, realSymbol, interposeCname, asmLabel, suffix) {
@@ -277,6 +300,7 @@ function genStaticWrapper(name, meta, realSymbol, interposeCname, asmLabel, suff
   }
   lines.push('    }');
   lines.push(...envPre);
+  lines.push(...dataRewriteLines(args));
   lines.push(`    ${ret} result = ${mainCall};`);
   lines.push(...envPost);
   if (envPost.length === 0) {
@@ -363,6 +387,7 @@ function genWrapper(name, meta) {
     lines.push(`        return ${denyRet};`);
     lines.push('    }');
     lines.push(...envPre);
+  lines.push(...dataRewriteLines(args));
     const lookupMode = name in MACOS_NOCANCEL_SYMBOL ? 'RTLD_DEFAULT' : 'RTLD_NEXT';
     const lookupSym = MACOS_NOCANCEL_SYMBOL[name] || name;
     lines.push(`    if (!vpo_real_${name}) {`);
@@ -468,6 +493,7 @@ function genLinuxWrapper(name, meta, cName = name) {
   }
   lines.push('    }');
   lines.push(...envPre);
+  lines.push(...dataRewriteLines(args));
   lines.push(`    if (!vpo_real_${c}) {`);
   lines.push(`        vpo_real_${c} = (vpo_real_${c}_t)dlsym(RTLD_NEXT, "${c}");`);
   lines.push('    }');

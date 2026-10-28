@@ -63,8 +63,13 @@ def chain() -> int:
     return _main(["chain"])
 
 
-def run(cmd, quiet: bool = True) -> int:
-    argv = ["run"] + (["-q"] if quiet else []) + [str(c) for c in cmd]
+def run(cmd, quiet: bool = True, hook: str | None = None) -> int:
+    argv = ["run"]
+    if quiet:
+        argv.append("-q")
+    if hook:
+        argv += ["--hook", str(hook)]
+    argv += [str(c) for c in cmd]
     return vpo_hook.main(argv)
 
 

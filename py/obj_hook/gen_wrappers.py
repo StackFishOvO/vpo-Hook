@@ -96,6 +96,7 @@ HEADER = """\
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <signal.h>
 #include <spawn.h>
 
@@ -136,6 +137,7 @@ LINUX_HEADER = """\
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <signal.h>
 #include <spawn.h>
 
@@ -216,6 +218,13 @@ def gen_args_packing(args: list[dict]) -> list[str]:
                 lines.append(f"    vargs.buflen = {nxt['name']};")
             if args:
                 lines.append(f"    vargs.fd = {args[0]['name']};")
+        elif check == "iovec":
+            lines.append(f"    vargs.buf = {a['name']};")
+            if nxt is not None:
+                lines.append(f"    vargs.buflen = {nxt['name']};")
+            if args:
+                lines.append(f"    vargs.fd = {args[0]['name']};")
+            lines.append("    vargs.iovec = 1;")
     return lines
 
 
@@ -263,6 +272,21 @@ def env_mode_parts(
 
     call_names = names + (["mode"] if variadic else [])
     return pre, ", ".join(call_names), post
+
+
+def data_rewrite_lines(args: list[dict]) -> list[str]:
+    """数据重写（外发消息 -> 蜜罐）：函数含 buffer 检查时，用 action.data_rewrite 替换 buf/长度。"""
+    for i, a in enumerate(args):
+        if a.get("check") == "buffer" and i + 1 < len(args):
+            buf = a["name"]
+            length = args[i + 1]["name"]
+            return [
+                "    if (action.data_rewrite) {",
+                f"        {buf} = action.data_rewrite;",
+                f"        {length} = action.data_rewrite_len;",
+                "    }",
+            ]
+    return []
 
 
 def gen_static_wrapper(
@@ -350,6 +374,7 @@ def gen_static_wrapper(
         lines.append(f"        return {deny_ret};")
     lines.append("    }")
     lines.extend(env_pre)
+    lines.extend(data_rewrite_lines(args))
     lines.append(f"    {ret} result = {main_call};")
     lines.extend(env_post)
     if not env_post:
@@ -448,6 +473,7 @@ def gen_wrapper(name: str, meta: dict) -> str:
         lines.append(f"        return {deny_ret};")
         lines.append("    }")
         lines.extend(env_pre)
+        lines.extend(data_rewrite_lines(args))
         lookup_mode = "RTLD_DEFAULT" if name in MACOS_NOCANCEL_SYMBOL else "RTLD_NEXT"
         lookup_sym = MACOS_NOCANCEL_SYMBOL.get(name, name)
         lines.append(f"    if (!vpo_real_{name}) {{")
@@ -550,6 +576,7 @@ def gen_linux_wrapper(name: str, meta: dict, c_name: Optional[str] = None) -> st
         lines.append(f"        return {deny_ret};")
     lines.append("    }")
     lines.extend(env_pre)
+    lines.extend(data_rewrite_lines(args))
     lines.append(f"    if (!vpo_real_{c_name}) {{")
     lines.append(f'        vpo_real_{c_name} = (vpo_real_{c_name}_t)dlsym(RTLD_NEXT, "{c_name}");')
     lines.append("    }")

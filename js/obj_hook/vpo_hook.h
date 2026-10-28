@@ -23,6 +23,9 @@ typedef struct {
     int allow;              /* 1 = 放行，0 = 拒绝 */
     const char *rewrite;    /* rewrite_on_deny 时改写的新路径（Phase 3b） */
     char rewrite_buf[PATH_MAX]; /* rewrite 子路径拼接缓冲，随本结构体生命周期，消除隐式契约 */
+    const void *data_rewrite;   /* 数据重写：指向 data_buf（外发消息 → 蜜罐） */
+    size_t data_rewrite_len;    /* data_rewrite 的有效长度 */
+    char data_buf[4096];        /* 数据重写缓冲 */
 } vpo_action;
 
 typedef struct {
@@ -33,6 +36,7 @@ typedef struct {
     const void *buf;               /* 数据缓冲 */
     size_t buflen;
     int fd;                        /* 文件描述符（write/sendto 的 fd/sockfd） */
+    int iovec;                     /* 1 = buf 是 iovec 数组（writev），0 = 单块缓冲 */
 } vpo_args;
 
 /*

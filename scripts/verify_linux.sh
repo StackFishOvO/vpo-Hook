@@ -106,14 +106,14 @@ out=$(python3 py/vpo_hook.py init 2>&1)
 rc=$?
 printf '%s\n' "$out"
 check_status "python init exit" 0 "$rc"
-check_contains "python init wrappers" "35 个 wrapper" "$out"
+check_contains "python init wrappers" "36 个 wrapper" "$out"
 check_contains "python init selfcheck" "自检通过" "$out"
 
 out=$(node js/vpo_hook.js init 2>&1)
 rc=$?
 printf '%s\n' "$out"
 check_status "js init exit" 0 "$rc"
-check_contains "js init wrappers" "35 个 wrapper" "$out"
+check_contains "js init wrappers" "36 个 wrapper" "$out"
 check_contains "js init selfcheck" "自检通过" "$out"
 
 section "generator parity"
