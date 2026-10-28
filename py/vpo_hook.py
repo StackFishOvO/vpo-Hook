@@ -39,6 +39,7 @@ HOOK_DIR = HERE / "obj_hook"
 CONFIG_DIR = Path.home() / ".vpo-hook"
 CONFIG_PATH = CONFIG_DIR / "config.yaml"
 TEMPLATE_CONFIG = HOOK_DIR / "config.yaml"
+SIMPLE_TEMPLATE_CONFIG = HOOK_DIR / "config.simple.yaml"
 GRANTS_DIR = CONFIG_DIR / "grants"
 DENIALS_LOG = CONFIG_DIR / "denials.log"
 SIGN_KEY_PATH = CONFIG_DIR / ".sign_key"
@@ -142,10 +143,12 @@ def build_hook() -> Path:
 def cmd_init(_args: argparse.Namespace) -> int:
     print(f"[vpo-hook] 平台检测: {platform.system()} {platform.machine()}")
 
+    template = SIMPLE_TEMPLATE_CONFIG if getattr(_args, "profile", None) == "simple" else TEMPLATE_CONFIG
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     created = not CONFIG_PATH.exists()
     if created:
-        shutil.copyfile(TEMPLATE_CONFIG, CONFIG_PATH)
+        shutil.copyfile(template, CONFIG_PATH)
         print(f"[vpo-hook] 已生成默认配置: {CONFIG_PATH}")
     else:
         print(f"[vpo-hook] 配置已存在: {CONFIG_PATH}")
@@ -598,6 +601,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
             continue
         ev = "; ".join(info["evidence"][:3])
         print(f"  {group:<10} score={info['score']:.2f}  证据: {ev}")
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    import vpoh
+    m = vpoh.discover(args.path)
+    print(json.dumps(m, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    import vpoh
+    m = vpoh.discover(args.path)
+    r = vpoh.generate(m, out_dir=getattr(args, "out", None))
+    print(json.dumps(r, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1361,7 +1379,10 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="vpo-hook", description="VPO-Hook 启动器")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="生成配置 + 编译 hook 库")
+    ip = sub.add_parser("init", help="生成配置 + 编译 hook 库")
+    ip.add_argument("--profile", choices=["simple", "complex"], default=None,
+                    help="生成 simple 或 complex（默认 complex）配置模板")
+
     r = sub.add_parser("run", help="注入 hook 并运行目标进程")
     r.add_argument("-q", "--quiet", action="store_true", help="不输出启动器诊断信息")
     r.add_argument("-v", "--verbose", action="store_true", help="输出详细诊断信息")
@@ -1387,6 +1408,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("sign", help="对配置文件签名")
     sub.add_parser("chain", help="校验审计链")
 
+    d = sub.add_parser("discover", help="扫描包的能力候选面（信源 + 符号）")
+    d.add_argument("path", help="目录或模块名")
+    g = sub.add_parser("generate", help="discover 后生成定制 hook 二进制")
+    g.add_argument("path", help="目录或模块名")
+    g.add_argument("--out", default=None, help="输出目录")
+
     args = p.parse_args(argv)
     if args.command == "init":
         return cmd_init(args)
@@ -1408,6 +1435,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_sign(args)
     if args.command == "chain":
         return cmd_chain(args)
+    if args.command == "discover":
+        return cmd_discover(args)
+    if args.command == "generate":
+        return cmd_generate(args)
     return 0
 
 

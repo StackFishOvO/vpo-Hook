@@ -22,6 +22,7 @@ const JS_PLAINTEXT = path.join(HERE, 'plaintext');
 const CONFIG_DIR = path.join(os.homedir(), '.vpo-hook');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.yaml');
 const TEMPLATE_CONFIG = path.join(HOOK_DIR, 'config.yaml');
+const SIMPLE_TEMPLATE_CONFIG = path.join(HOOK_DIR, 'config.simple.yaml');
 const GRANTS_DIR = path.join(CONFIG_DIR, 'grants');
 const SIGN_KEY_PATH = path.join(CONFIG_DIR, '.sign_key');
 const SIG_PATH = path.join(CONFIG_DIR, 'config.sig');
@@ -85,12 +86,14 @@ function buildHook() {
 }
 
 // ---------------------------------------------------------------------------
-function cmdInit() {
+function cmdInit(args = []) {
+  const simple = args.includes('--profile') && args[args.indexOf('--profile') + 1] === 'simple';
+  const template = simple ? SIMPLE_TEMPLATE_CONFIG : TEMPLATE_CONFIG;
   console.log(`[vpo-hook] 平台检测: ${process.platform} ${os.arch()}`);
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   const created = !fs.existsSync(CONFIG_PATH);
   if (created) {
-    fs.copyFileSync(TEMPLATE_CONFIG, CONFIG_PATH);
+    fs.copyFileSync(template, CONFIG_PATH);
     console.log(`[vpo-hook] 已生成默认配置: ${CONFIG_PATH}`);
   } else {
     console.log(`[vpo-hook] 配置已存在: ${CONFIG_PATH}`);
@@ -776,6 +779,33 @@ function cmdChain() {
   return 1;
 }
 
+function cmdDiscover(args) {
+  const target = args[0];
+  if (!target) {
+    console.error('用法: vpo-hook discover <目录|模块名>');
+    return 1;
+  }
+  const vpoh = require('./vpoh.js');
+  const m = vpoh.discover(target);
+  console.log(JSON.stringify(m, null, 2));
+  return 0;
+}
+
+function cmdGenerate(args) {
+  const target = args[0];
+  if (!target) {
+    console.error('用法: vpo-hook generate <目录|模块名> [--out dir]');
+    return 1;
+  }
+  const outIdx = args.indexOf('--out');
+  const out = outIdx >= 0 ? args[outIdx + 1] : null;
+  const vpoh = require('./vpoh.js');
+  const m = vpoh.discover(target);
+  const r = vpoh.generate(m, out);
+  console.log(JSON.stringify(r, null, 2));
+  return 0;
+}
+
 function parseYamlList(text, key) {
   const result = [];
   let inSection = false;
@@ -1112,7 +1142,7 @@ function cmdStatus() {
 function dispatch(args) {
   const cmd = args[0];
   let code = 0;
-  if (cmd === 'init') code = cmdInit();
+  if (cmd === 'init') code = cmdInit(args.slice(1));
   else if (cmd === 'run') code = cmdRun(args.slice(1));
   else if (cmd === 'status') code = cmdStatus();
   else if (cmd === 'scan') code = cmdScan(args.slice(1));
@@ -1122,8 +1152,10 @@ function dispatch(args) {
   else if (cmd === 'revoke') code = cmdRevoke(args.slice(1));
   else if (cmd === 'sign') code = cmdSign();
   else if (cmd === 'chain') code = cmdChain();
+  else if (cmd === 'discover') code = cmdDiscover(args.slice(1));
+  else if (cmd === 'generate') code = cmdGenerate(args.slice(1));
   else {
-    console.error('用法: vpo-hook init | run [-q|-v] <command...> | status | scan | log | list | grant | revoke | sign | chain');
+    console.error('用法: vpo-hook init [--profile simple|complex] | run [-q|-v] <command...> | status | scan | log | list | grant | revoke | sign | chain | discover | generate');
     code = 1;
   }
   return code;

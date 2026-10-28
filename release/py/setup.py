@@ -12,6 +12,7 @@ setup(
     package_data={
         "vpohook": [
             "obj_hook/config.yaml",
+            "obj_hook/config.simple.yaml",
             "obj_hook/gen_wrappers.py",
             "obj_hook/honeypot.py",
             "obj_hook/policy.c",

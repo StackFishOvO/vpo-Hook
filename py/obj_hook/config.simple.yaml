@@ -1,0 +1,33 @@
+# VPO-Hook 简单安全组配置模板
+# 面向普通用户：只暴露少量权限组，默认值安全。
+# 复杂安全组请用 config.yaml（完整版）。
+
+version: 1
+profile: simple
+name: "my-app"            # 你的应用名（用于授权/审计标识）
+
+env: auto                # auto = 自动判定 venv/node 环境根；或填绝对路径
+
+permissions:
+  files:
+    extra_read: []       # 额外允许读的绝对路径（可选）
+    extra_write: []      # 额外允许写的绝对路径（可选）
+  network:
+    mode: off            # off | internet | allowlist
+    allowlist: []        # allowlist 时填 host:port，例如 ["8.8.8.8:53"]
+    blocklist: []        # 想拉黑的可疑 host/ip，例如 ["evil.example.com"]
+  process:
+    fork: true           # 允许 fork，但默认不允许 exec
+    exec: off            # off | allowlist | shell
+    exec_allow: []       # allowlist 时填可执行文件绝对路径
+
+inbound:
+  inspect: true          # 检查网络入站内容是否含敏感标记
+  action: audit          # audit（只记录）| block（拦截）
+
+sources:                 # 信源：显式进入 deny 的包才会被拒
+  allow: []
+  deny: []
+
+sensitive_files: []      # 额外要保护（读蜜罐/写拦截）的路径
+audit: on                # 审计开关（占位，后续接结构化审计）
