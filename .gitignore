@@ -1,3 +1,10 @@
+# Internal planning docs (kept locally; only LINUX_MIGRATION.md is tracked)
+/Target.md
+/addition.md
+/L3-L4.md
+/note.md
+/API*.md
+
 # Python
 __pycache__/
 *.py[cod]
