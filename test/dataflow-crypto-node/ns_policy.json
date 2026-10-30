@@ -1,0 +1,20 @@
+{
+  "schema": "vpoh.ns_policy.v1",
+  "namespaces": {
+    "crypto_pkg": {
+      "role": "source",
+      "functions": ["encrypt", "decrypt"]
+    },
+    "node_http": {
+      "role": "sink",
+      "framework": "http"
+    }
+  },
+  "flows": [
+    {
+      "from": "crypto_pkg",
+      "to": "node_http",
+      "action": "deny"
+    }
+  ]
+}

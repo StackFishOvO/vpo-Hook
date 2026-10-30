@@ -86,6 +86,7 @@ CONSISTENCY_PAIRS = [
     ("release/js/obj_hook/config.yaml", "release/py/vpohook/obj_hook/config.yaml"),
     ("release/js/plaintext/interpose.js", "release/py/vpohook/js_plaintext/interpose.js"),
     ("release/js/plaintext/preload.js", "release/py/vpohook/js_plaintext/preload.js"),
+    ("release/js/plaintext/ns_guard.js", "release/py/vpohook/js_plaintext/ns_guard.js"),
     ("release/js/py_plaintext/interpose.py", "release/py/vpohook/plaintext/interpose.py"),
     (
         "release/js/py_plaintext/sitecustomize.py",

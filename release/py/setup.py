@@ -24,6 +24,7 @@ setup(
             "plaintext/ns_guard.py",
             "js_plaintext/interpose.js",
             "js_plaintext/preload.js",
+            "js_plaintext/ns_guard.js",
         ],
     },
     entry_points={

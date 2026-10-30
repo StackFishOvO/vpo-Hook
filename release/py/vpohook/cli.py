@@ -1368,6 +1368,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             if hm:
                 env["VPO_REWRITE_MAP"] = ":".join(f"{k}={v}" for k, v in hm.items())
 
+    # JS preload 路径（release.py 会把这一行改写成包内 js_plaintext 路径）
+    preload = HERE / "js_plaintext" / "preload.js"
+
     # 名文 hook 注入（接口级，按目标语言）
     if config_text:
         if lang == "python":
@@ -1384,7 +1387,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         elif lang == "js":
             apis = _cfg_list(cfg, "plaintext", "js")
             if apis:
-                preload = HERE / "js_plaintext" / "preload.js"
                 if not preload.exists():
                     print("[vpo-hook] 缺少 preload.js（打包不完整）", file=sys.stderr)
                     return 1
@@ -1414,7 +1416,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 env["PYTHONPATH"] = os.pathsep.join([str(plaintext), *parts]) if parts else str(plaintext)
             log(f"[vpo-hook] namespace guard(python): {ns_path}")
         elif lang == "js":
-            log("[vpo-hook] namespace guard 目前仅支持 Python 目标")
+            if not preload.exists():
+                print("[vpo-hook] 缺少 preload.js（打包不完整）", file=sys.stderr)
+                return 1
+            env["VPO_NODE_OPTIONS"] = f"--require {preload}"
+            no = env.get("NODE_OPTIONS", "")
+            if str(preload) not in no:
+                env["NODE_OPTIONS"] = (f"--require {preload} " + no).strip()
+            log(f"[vpo-hook] namespace guard(js): {ns_path}")
 
     # 对象创建审计注入（默认关闭，只记录调用链）
     if config_text:

@@ -1209,7 +1209,15 @@ function cmdRun(args) {
       if (!parts.includes(PY_PLAINTEXT)) env.PYTHONPATH = [PY_PLAINTEXT, ...parts].join(':');
       log(`[vpo-hook] namespace guard(python): ${nsPath}`);
     } else if (lang === 'js') {
-      log('[vpo-hook] namespace guard 目前仅支持 Python 目标');
+      const preload = path.join(JS_PLAINTEXT, 'preload.js');
+      if (!fs.existsSync(preload)) {
+        console.error('[vpo-hook] 缺少 preload.js（打包不完整）');
+        return 1;
+      }
+      env.VPO_NODE_OPTIONS = `--require ${preload}`;
+      const no = env.NODE_OPTIONS || '';
+      if (!no.includes(preload)) env.NODE_OPTIONS = `--require ${preload}` + (no ? ' ' + no : '');
+      log(`[vpo-hook] namespace guard(js): ${nsPath}`);
     }
   }
 

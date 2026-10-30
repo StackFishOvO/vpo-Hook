@@ -201,6 +201,17 @@ function installAudit() {
   }
 }
 
+function installNamespaceGuard() {
+  const policyPath = process.env.VPO_NS_POLICY;
+  if (!policyPath) return;
+  try {
+    require('./ns_guard').installFromFile(policyPath);
+  } catch (err) {
+    if (!QUIET) console.error(`[vpo-ns] 安装失败: ${err.message}`);
+  }
+}
+
 installPlaintext();
 installSources();
 installAudit();
+installNamespaceGuard();
