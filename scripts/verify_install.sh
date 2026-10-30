@@ -116,6 +116,13 @@ else
   fail "pip console script exists"
 fi
 
+if [[ -x "$PY" ]]; then
+  out=$("$PY" -c 'import vpoh; print(callable(vpoh.discover), callable(vpoh.generate))' 2>&1)
+  rc=$?
+  check_status "pip SDK import exit" 0 "$rc"
+  contains "pip SDK import API" "True True" "$out"
+fi
+
 # ---------------------------------------------------------------------------
 # npm install from release/js
 # ---------------------------------------------------------------------------
@@ -135,6 +142,11 @@ if [[ -x "$NPM_BIN" ]]; then
 else
   fail "npm bin exists"
 fi
+
+out=$(NODE_PATH="$TMP/npm-prefix/lib/node_modules" node -e   'const v = require("vpo-hook"); console.log(typeof v.discover, typeof v.generate)' 2>&1)
+rc=$?
+check_status "npm SDK import exit" 0 "$rc"
+contains "npm SDK import API" "function function" "$out"
 
 # ---------------------------------------------------------------------------
 # 安装后：init + status + run
