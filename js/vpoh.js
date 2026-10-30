@@ -19,6 +19,46 @@ const { spawnSync } = require('child_process');
 const hook = require('./vpo_hook');
 const HOOK_DIR = path.join(__dirname, 'obj_hook');
 
+class PreImportedTargetError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'PreImportedTargetError';
+    this.code = 'PRE_IMPORTED_TARGET';
+  }
+}
+
+class OpsScriptPlacementError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'OpsScriptPlacementError';
+    this.code = 'OPS_SCRIPT_PLACEMENT';
+  }
+}
+
+function assertOpsContext() {
+  const markers = [
+    'VPO_HOOK_CONFIG',
+    'VPO_NS_POLICY',
+    'VPO_PYTHONPATH',
+    'VPO_NODE_OPTIONS',
+    'VPO_ENV_ROOT',
+    'VPO_DENY_PATHS',
+    'VPO_HOOK_PY_API',
+    'VPO_HOOK_JS_API',
+  ];
+  const found = markers.filter((name) => !!process.env[name]);
+  if (found.length) {
+    throw new OpsScriptPlacementError(
+      'vpoh SDK is ops-only and must not be imported inside a ' +
+      'vpo-hook-protected task or MCP process ' +
+      `(detected: ${found.join(', ')}). ` +
+      'Run discovery/generation from a separate ops process, or invoke the vpo-hook CLI.',
+    );
+  }
+}
+
+assertOpsContext();
+
 const MANIFEST_SCHEMA = 'vpoh.manifest.v1';
 const HOOK_PLAN_SCHEMA = 'vpoh.hook_plan.v1';
 const SANDBOX_SCHEMA = 'vpoh.sandbox.v1';
@@ -314,68 +354,6 @@ function placeholder() {
   };
 }
 
-function classMethods(cls) {
-  const out = new Set();
-  if (cls && cls.prototype) {
-    for (const name of Object.getOwnPropertyNames(cls.prototype)) {
-      if (name === 'constructor' || name.startsWith('_')) continue;
-      let value;
-      try { value = cls.prototype[name]; } catch (_e) { continue; }
-      if (typeof value === 'function') out.add(name);
-    }
-  }
-  return sortedUnique(Array.from(out));
-}
-
-function discoverObject(obj) {
-  const label = (typeof obj === 'function' && obj.name) ||
-    (obj && obj.constructor && obj.constructor.name) || 'object';
-  const apis = new Set();
-  const classes = {};
-
-  if (typeof obj === 'function') {
-    classes[label] = classMethods(obj);
-    apis.add(label);
-    for (const method of classes[label]) apis.add(`${label}.${method}`);
-  } else {
-    for (const key of Object.keys(obj || {})) {
-      if (key.startsWith('_')) continue;
-      apis.add(key);
-      const value = obj[key];
-      if (typeof value === 'function' && value.prototype) {
-        const methods = classMethods(value);
-        if (methods.length) {
-          classes[key] = methods;
-          for (const method of methods) apis.add(`${key}.${method}`);
-        }
-      }
-    }
-    const ctor = obj && obj.constructor;
-    if (ctor && ctor.name && ctor.name !== 'Object') {
-      const methods = classMethods(ctor);
-      if (methods.length) {
-        classes[ctor.name] = methods;
-        for (const method of methods) apis.add(`${ctor.name}.${method}`);
-      }
-    }
-  }
-
-  return {
-    schema: MANIFEST_SCHEMA,
-    target: label,
-    runtime: 'js',
-    pkg: { name: label, version: null, manager: 'npm', root: null },
-    apis: { python: [], js: sortedUnique(Array.from(apis)) },
-    classes: { python: {}, js: sortClasses(classes) },
-    modules: { python: [], js: [] },
-    native: [],
-    symbols: [],
-    exports: [],
-    deps: [],
-    placeholder: placeholder(),
-  };
-}
-
 function walkFiles(root) {
   const out = [];
   const stack = [''];
@@ -396,15 +374,21 @@ function walkFiles(root) {
 }
 
 function discover(target, opts = {}) {
-  if (Array.isArray(target)) {
-    throw new TypeError('command discovery is not implemented yet; pass an executable path or package path');
+  if (typeof target !== 'string') {
+    throw new PreImportedTargetError(
+      'vpoh.discover() accepts only a filesystem path; already imported objects ' +
+      'are rejected because importing the target executes untrusted code. ' +
+      'Run discovery in a clean ops process.',
+    );
   }
-  if (target && typeof target === 'object' && typeof target.pid === 'number' && typeof target.kill === 'function') {
-    throw new TypeError('attaching to a running process is not supported; pass a command spec or package path');
-  }
-  if (target !== null && typeof target !== 'string') return discoverObject(target);
   const dynamic = typeof opts === 'boolean' ? opts : !!opts.dynamic;
-  const t = String(target);
+  if (dynamic && process.env.VPO_ALLOW_UNSAFE_DYNAMIC !== '1') {
+    throw new PreImportedTargetError(
+      'dynamic discovery imports the target and can execute untrusted code; ' +
+      'set VPO_ALLOW_UNSAFE_DYNAMIC=1 only in an isolated ops environment',
+    );
+  }
+  const t = target;
   let st = null;
   try { st = fs.statSync(t); } catch (_e) {}
 
@@ -441,6 +425,15 @@ function discover(target, opts = {}) {
 
   if (st && st.isDirectory()) {
     const root = path.resolve(t);
+    const loaded = Object.values(require.cache)
+      .map((m) => m.filename)
+      .filter((f) => f && f.startsWith(root + path.sep));
+    if (loaded.length) {
+      throw new PreImportedTargetError(
+        `target package is already imported: ${loaded.slice(0, 8).join(', ')}. ` +
+        'Restart the ops process before discovery.',
+      );
+    }
     pkg = pkgInfo(root);
     for (const rel of walkFiles(root)) {
       const file = path.join(root, rel);
@@ -481,6 +474,12 @@ function discover(target, opts = {}) {
       runtime = 'native';
     }
   } else if (st && st.isFile()) {
+    const abs = path.resolve(t);
+    if (require.cache[abs]) {
+      throw new PreImportedTargetError(
+        `target file is already imported: ${t}. Restart the ops process before discovery.`,
+      );
+    }
     const suffix = path.extname(t).toLowerCase();
     pkg = { name: path.basename(t).replace(/\.[^.]+$/, ''), version: null, manager: null, root: path.dirname(t) };
     if (suffix === '.py') {
@@ -501,12 +500,15 @@ function discover(target, opts = {}) {
       runtime = 'native';
     }
   } else {
-    const r = reflectJs(t);
-    pkg = { name: t, version: null, manager: 'npm' };
-    for (const x of r.attrs || []) jsExports.add(x);
-    for (const [cls, methods] of Object.entries(r.classes || {})) jsClasses[cls] = methods;
-    for (const x of r.deps || []) deps.add(x);
-    runtime = 'js';
+    let resolved;
+    try {
+      resolved = require.resolve(t);
+    } catch (_e) {
+      throw new PreImportedTargetError(
+        `target not found: ${t}; pass an existing package or file path.`,
+      );
+    }
+    return discover(resolved, opts);
   }
 
   const pyClassesSorted = sortClasses(pyClasses);

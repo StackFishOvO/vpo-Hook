@@ -24,23 +24,35 @@ assert m["native"], m["native"]
 assert "read_file" in m["apis"]["python"] or "run_cmd" in m["apis"]["python"], m["apis"]["python"]
 assert m["placeholder"]["fake_symbols"]["status"] == "placeholder", m["placeholder"]
 
+try:
+    vpoh.discover("test/sdk_test/pydemo", dynamic=True)
+except vpoh.PreImportedTargetError:
+    pass
+else:
+    raise AssertionError("dynamic discovery must be opt-in only")
+
 sys.path.insert(0, "test/sdk_test")
 import pydemo
-m_obj = vpoh.discover(pydemo)
-assert "read_file" in m_obj["apis"]["python"], m_obj
+
+for target in (pydemo,):
+    try:
+        vpoh.discover(target)
+    except vpoh.PreImportedTargetError:
+        pass
+    else:
+        raise AssertionError("pre-imported module target must be rejected")
 
 class Demo:
     def read(self):
         pass
 
-m_cls = vpoh.discover(Demo)
-assert m_cls["classes"]["python"].get("Demo") == ["read"], m_cls
-try:
-    vpoh.discover(["python3", "server.py"])
-except TypeError:
-    pass
-else:
-    raise AssertionError("running-process/command discovery should be rejected for now")
+for target in (Demo, Demo(), ["python3", "server.py"]):
+    try:
+        vpoh.discover(target)
+    except vpoh.PreImportedTargetError:
+        pass
+    else:
+        raise AssertionError("non-path target must be rejected")
 
 r = vpoh.generate(m, out_dir="test/sdk_test/.vpo")
 assert r["so"] and r["subset"], r
@@ -79,19 +91,24 @@ if (m.schema !== 'vpoh.manifest.v1') throw new Error('bad schema');
 if (!m.apis.js.includes('readFile') && !m.apis.js.includes('exec')) {
   throw new Error('jsdemo candidate surface missing: ' + JSON.stringify(m.apis.js));
 }
+let dynamicRejected = false;
+try { vpoh.discover('test/sdk_test/jsdemo', { dynamic: true }); } catch (err) {
+  dynamicRejected = err.code === 'PRE_IMPORTED_TARGET';
+}
+if (!dynamicRejected) throw new Error('dynamic discovery must be opt-in only');
+
 const mod = require('./test/sdk_test/jsdemo');
-const mObj = vpoh.discover(mod);
-if (!mObj.apis.js.includes('readFile') && !mObj.apis.js.includes('exec')) {
-  throw new Error('module reflection missing: ' + JSON.stringify(mObj.apis.js));
+for (const target of [mod, class Demo { read() {} }, ['python3', 'server.py']]) {
+  let rejected = false;
+  try { vpoh.discover(target); } catch (err) { rejected = err.code === 'PRE_IMPORTED_TARGET'; }
+  if (!rejected) throw new Error('non-path target must be rejected');
 }
-class Demo { read() {} }
-const mCls = vpoh.discover(Demo);
-if (!(mCls.classes.js.Demo || []).includes('read')) {
-  throw new Error('class reflection missing: ' + JSON.stringify(mCls.classes.js));
+
+let preImportedRejected = false;
+try { vpoh.discover('test/sdk_test/jsdemo'); } catch (err) {
+  preImportedRejected = err.code === 'PRE_IMPORTED_TARGET';
 }
-let rejected = false;
-try { vpoh.discover(['python3', 'server.py']); } catch (_e) { rejected = true; }
-if (!rejected) throw new Error('command discovery should be rejected for now');
+if (!preImportedRejected) throw new Error('pre-imported path target must be rejected');
 const r = vpoh.generate(m, 'test/sdk_test/.vpo-js');
 console.log('GENERATE_JS', JSON.stringify(r));
 for (const name of ['manifest.json', 'hook_plan.json', 'sandbox.json', 'config.yaml', 'launch.sh']) {
@@ -142,7 +159,22 @@ assert a == b, (a, b)
 print("MANIFEST PARITY OK")
 PY
 
-# 7. 清理产物
+# 7. SDK 只能在运维进程里 import，不能进 vpo-hook 保护的目标/MCP 进程
+PY_GUARD=$(VPO_HOOK_CONFIG=/tmp/vpo-guard-test PYTHONPATH=py python3 -c 'import vpoh' 2>&1 || true)
+printf '%s' "$PY_GUARD" | grep -q 'ops-only'
+JS_GUARD=$(VPO_HOOK_CONFIG=/tmp/vpo-guard-test node -e "require('./js/vpoh.js')" 2>&1 || true)
+printf '%s' "$JS_GUARD" | grep -q 'ops-only'
+PY_PREIMPORT=$(PYTHONPATH=py python3 -c '
+import sys
+sys.path.insert(0, "test/sdk_test")
+import pydemo
+import vpoh
+vpoh.discover("test/sdk_test/pydemo")
+' 2>&1 || true)
+printf '%s' "$PY_PREIMPORT" | grep -q 'already imported'
+echo "OPS GUARD OK"
+
+# 8. 清理产物
 rm -f test/sdk_test/pydemo/demo_ext.so
 rm -rf test/sdk_test/.vpo test/sdk_test/.vpo-js test/sdk_test/.vpo-ns test/sdk_test/.vpo-js-ns
 rm -f /tmp/vpo_manifest_py.json /tmp/vpo_manifest_js.json

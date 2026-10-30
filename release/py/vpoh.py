@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import platform
 import re
 import shutil
@@ -27,6 +28,42 @@ try:
     import vpo_hook
 except ImportError:  # 安装后的包：CLI 在 vpohook.cli
     import vpohook.cli as vpo_hook
+
+
+class PreImportedTargetError(RuntimeError):
+    """Raised when an ops target is already imported or is not a path/name."""
+
+    code = "PRE_IMPORTED_TARGET"
+
+
+class OpsScriptPlacementError(RuntimeError):
+    """Raised when the ops-only SDK is imported inside a protected target."""
+
+    code = "OPS_SCRIPT_PLACEMENT"
+
+
+def _assert_ops_context() -> None:
+    markers = (
+        "VPO_HOOK_CONFIG",
+        "VPO_NS_POLICY",
+        "VPO_PYTHONPATH",
+        "VPO_NODE_OPTIONS",
+        "VPO_ENV_ROOT",
+        "VPO_DENY_PATHS",
+        "VPO_HOOK_PY_API",
+        "VPO_HOOK_JS_API",
+    )
+    found = [name for name in markers if os.environ.get(name)]
+    if found:
+        raise OpsScriptPlacementError(
+            "vpoh SDK is ops-only and must not be imported inside a "
+            "vpo-hook-protected task or MCP process "
+            f"(detected: {', '.join(found)}). "
+            "Run discovery/generation from a separate ops process, or invoke the vpo-hook CLI."
+        )
+
+
+_assert_ops_context()
 
 
 MANIFEST_SCHEMA = "vpoh.manifest.v1"
@@ -400,75 +437,38 @@ def _placeholder() -> dict:
     }
 
 
-def _class_methods(obj) -> list[str]:
-    import inspect
-
-    return _sorted_unique(
-        name
-        for name, value in inspect.getmembers(
-            obj, predicate=lambda v: inspect.isfunction(v) or inspect.ismethod(v)
-        )
-        if not name.startswith("_")
-    )
-
-
-def _discover_object(obj) -> dict:
-    """反射已经加载到当前进程里的 module / class / instance。"""
-    import inspect
-
-    label = getattr(obj, "__name__", None) or type(obj).__name__
-    functions: set[str] = set()
-    classes: dict[str, list[str]] = {}
-
-    if inspect.ismodule(obj):
-        members = [(name, getattr(obj, name)) for name in dir(obj) if not name.startswith("_")]
-    elif inspect.isclass(obj):
-        classes[label] = _class_methods(obj)
-        members = [(label, obj)]
-    else:
-        classes[type(obj).__name__] = _class_methods(type(obj))
-        members = [(name, getattr(obj, name)) for name in dir(obj) if not name.startswith("_")]
-
-    for name, value in members:
-        if inspect.isclass(value):
-            classes[value.__name__] = _class_methods(value)
-        elif callable(value):
-            functions.add(name)
-
-    apis = set(functions)
-    apis.update(classes.keys())
-    for cls, methods in classes.items():
-        apis.update(f"{cls}.{method}" for method in methods)
-
-    return {
-        "schema": MANIFEST_SCHEMA,
-        "target": label,
-        "runtime": "python",
-        "pkg": {"name": label, "version": None, "manager": "pip", "root": None},
-        "apis": {"python": _sorted_unique(apis), "js": []},
-        "classes": {"python": _sort_classes(classes), "js": {}},
-        "modules": {"python": [], "js": []},
-        "native": [],
-        "symbols": [],
-        "exports": [],
-        "deps": [],
-        "placeholder": _placeholder(),
-    }
+def _loaded_modules_under(root: Path) -> list[str]:
+    """Return modules already imported from under root (pre-import detector)."""
+    loaded: list[str] = []
+    try:
+        root = root.resolve()
+    except OSError:
+        pass
+    for name, module in list(sys.modules.items()):
+        filename = getattr(module, "__file__", None)
+        if not filename:
+            continue
+        try:
+            file_path = Path(filename).resolve()
+            file_path.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        loaded.append(name)
+    return sorted(loaded)
 
 
 def discover(target, dynamic: bool = False) -> dict:
-    if isinstance(target, (list, tuple)):
-        raise TypeError(
-            "command discovery is not implemented yet; pass an executable path or package path"
-        )
-    if isinstance(target, int) or (
-        hasattr(target, "pid") and hasattr(target, "poll")
-    ):
-        raise TypeError(
-            "attaching to a running process is not supported; pass a command spec or package path"
+    if dynamic and os.environ.get("VPO_ALLOW_UNSAFE_DYNAMIC") != "1":
+        raise PreImportedTargetError(
+            "dynamic discovery imports the target and can execute untrusted code; "
+            "set VPO_ALLOW_UNSAFE_DYNAMIC=1 only in an isolated ops environment"
         )
     if not isinstance(target, (str, Path)):
-        return _discover_object(target)
+        raise PreImportedTargetError(
+            "vpoh.discover() accepts only a filesystem path; already imported objects "
+            "are rejected because importing the target executes untrusted code. "
+            "Run discovery in a clean ops process."
+        )
 
     t = str(target)
     p = Path(t)
@@ -501,6 +501,13 @@ def discover(target, dynamic: bool = False) -> dict:
 
     if p.is_dir():
         root = p.resolve()
+        loaded = _loaded_modules_under(root)
+        if loaded:
+            raise PreImportedTargetError(
+                "target package is already imported: "
+                + ", ".join(loaded[:8])
+                + ". Restart the ops process before discovery."
+            )
         pkg = _pkg_info(root)
         py_dynamic_attrs: set[str] = set()
         js_dynamic_attrs: set[str] = set()
@@ -571,6 +578,14 @@ def discover(target, dynamic: bool = False) -> dict:
 
     elif p.is_file():
         suffix = p.suffix.lower()
+        if str(p.resolve()) in {
+            str(Path(getattr(mod, "__file__", "")).resolve())
+            for mod in sys.modules.values()
+            if getattr(mod, "__file__", None)
+        }:
+            raise PreImportedTargetError(
+                f"target file is already imported: {p}. Restart the ops process before discovery."
+            )
         pkg = {"name": p.stem, "version": None, "manager": None, "root": str(p.parent)}
         if suffix == ".py":
             py_files.append(p.name)
@@ -589,13 +604,26 @@ def discover(target, dynamic: bool = False) -> dict:
             symbols.update(found["undefined"])
             runtime = "native"
     else:
-        r = _reflect_python(t, None)
-        pkg = {"name": t, "version": None, "manager": "pip"}
-        py_functions.update(r.get("attrs", []))
-        for cls, methods in r.get("classes", {}).items():
-            py_classes.setdefault(cls, set()).update(methods)
-        deps.update(r.get("deps", []))
-        runtime = "python"
+        if "." in t:
+            raise PreImportedTargetError(
+                "module-name discovery is limited to top-level names; pass the package path instead."
+            )
+        import importlib.util
+
+        spec = importlib.util.find_spec(t)
+        if spec is None:
+            raise PreImportedTargetError(
+                f"target not found: {t!r}; pass an existing package or file path."
+            )
+        if spec.submodule_search_locations:
+            resolved = Path(next(iter(spec.submodule_search_locations)))
+        elif spec.origin:
+            resolved = Path(spec.origin)
+        else:
+            raise PreImportedTargetError(
+                f"target has no filesystem origin: {t!r}; pass an existing path."
+            )
+        return discover(resolved, dynamic=dynamic)
 
     py_classes_sorted = _sort_classes({k: sorted(v) for k, v in py_classes.items()})
     js_classes_sorted = _sort_classes({k: sorted(v) for k, v in js_classes.items()})
