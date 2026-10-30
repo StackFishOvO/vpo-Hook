@@ -91,6 +91,10 @@ CONSISTENCY_PAIRS = [
         "release/js/py_plaintext/sitecustomize.py",
         "release/py/vpohook/plaintext/sitecustomize.py",
     ),
+    (
+        "release/js/py_plaintext/ns_guard.py",
+        "release/py/vpohook/plaintext/ns_guard.py",
+    ),
 ]
 
 

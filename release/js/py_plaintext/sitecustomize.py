@@ -204,6 +204,21 @@ def _install_audit() -> None:
         )
 
 
+def _install_namespace_guard() -> None:
+    """L3-lite：按 VPO_NS_POLICY 安装 namespace 数据流守卫。"""
+    policy_path = os.environ.get("VPO_NS_POLICY")
+    if not policy_path:
+        return
+    try:
+        from ns_guard import install_from_file
+
+        install_from_file(policy_path)
+    except Exception as exc:
+        if not QUIET:
+            sys.stderr.write(f"[vpo-ns] 安装失败: {exc}\n")
+
+
 _install()
 _install_sources()
 _install_audit()
+_install_namespace_guard()

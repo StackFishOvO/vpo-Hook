@@ -21,6 +21,7 @@ setup(
             "obj_hook/vpo_hook.h",
             "plaintext/interpose.py",
             "plaintext/sitecustomize.py",
+            "plaintext/ns_guard.py",
             "js_plaintext/interpose.js",
             "js_plaintext/preload.js",
         ],

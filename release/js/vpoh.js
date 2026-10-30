@@ -621,7 +621,27 @@ function findCC() {
   return null;
 }
 
-function generate(manifest, outDir = null) {
+function normalizeNsPolicy(manifest, nsPolicy) {
+  let policy;
+  if (typeof nsPolicy === 'string') {
+    policy = JSON.parse(fs.readFileSync(nsPolicy, 'utf8'));
+  } else if (nsPolicy && typeof nsPolicy === 'object') {
+    policy = JSON.parse(JSON.stringify(nsPolicy));
+  } else {
+    const pkg = (manifest.pkg && manifest.pkg.name) || 'pkg';
+    policy = {
+      schema: 'vpoh.ns_policy.v1',
+      namespaces: { [pkg]: { role: 'package' } },
+      flows: [],
+    };
+  }
+  policy.schema = policy.schema || 'vpoh.ns_policy.v1';
+  policy.namespaces = policy.namespaces || {};
+  policy.flows = policy.flows || [];
+  return policy;
+}
+
+function generate(manifest, outDir = null, nsPolicy = null) {
   const m = normalizeManifest(manifest);
   const pkg = (m.pkg && m.pkg.name) || 'pkg';
   const safe = safeName(pkg);
@@ -645,7 +665,14 @@ function generate(manifest, outDir = null) {
 
   writeJson(path.join(out, 'manifest.json'), m);
 
+  const nsPolicyObj = normalizeNsPolicy(m, nsPolicy);
+  writeJson(path.join(out, 'ns_policy.json'), nsPolicyObj);
+  const nsActive = (nsPolicyObj.flows || []).length > 0 ||
+    Object.values(nsPolicyObj.namespaces || {}).some((cfg) =>
+      cfg && (['source', 'sink', 'untrusted'].includes(cfg.role) || cfg.source || cfg.sink));
+
   const sandbox = sandboxPlan(m);
+  sandbox.namespace = { policy: nsActive ? 'ns_policy.json' : null };
   writeJson(path.join(out, 'sandbox.json'), sandbox);
 
   const hookPlan = {
@@ -671,11 +698,13 @@ function generate(manifest, outDir = null) {
       },
     },
     sandbox,
+    namespace: nsPolicyObj,
     rawcalls: { status: 'placeholder', syscalls: [] },
     artifacts: {
       config: 'config.yaml',
       launch: 'launch.sh',
       sandbox: 'sandbox.json',
+      ns_policy: 'ns_policy.json',
     },
   };
   writeJson(path.join(out, 'hook_plan.json'), hookPlan);
@@ -714,12 +743,13 @@ function generate(manifest, outDir = null) {
   }
 
   const hookArg = so ? ` --hook "$HERE/${path.basename(so)}"` : '';
+  const nsArg = nsActive ? ' --ns-policy "$HERE/ns_policy.json"' : '';
   writeExec(
     path.join(out, 'launch.sh'),
     '#!/usr/bin/env bash\n' +
       'set -euo pipefail\n' +
       'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n' +
-      `exec vpo-hook run -q --config "$HERE/config.yaml"${hookArg} "$@"\n`,
+      `exec vpo-hook run -q --config "$HERE/config.yaml"${hookArg}${nsArg} "$@"\n`,
   );
 
   return {
@@ -730,6 +760,7 @@ function generate(manifest, outDir = null) {
     hook_plan: path.join(out, 'hook_plan.json'),
     sandbox: path.join(out, 'sandbox.json'),
     config: path.join(out, 'config.yaml'),
+    ns_policy: path.join(out, 'ns_policy.json'),
     launch: path.join(out, 'launch.sh'),
   };
 }

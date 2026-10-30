@@ -54,6 +54,19 @@ assert plan["binary"]["native"]["fake_symbols"]["status"] == "placeholder", plan
 assert plan["rawcalls"]["status"] == "placeholder", plan
 assert plan["sandbox"]["native"]["cross_package"] == "deny", plan
 print("GENERATE_PY", r["subset"], r["so"])
+
+ns_policy = {
+    "schema": "vpoh.ns_policy.v1",
+    "namespaces": {
+        "crypto_pkg": {"role": "source", "functions": ["encrypt"]},
+        "flask_app": {"role": "sink", "framework": "flask"},
+    },
+    "flows": [{"from": "crypto_pkg", "to": "flask_app", "action": "deny"}],
+}
+r_ns = vpoh.generate(m, out_dir="test/sdk_test/.vpo-ns", ns_policy=ns_policy)
+assert Path(r_ns["ns_policy"]).exists(), r_ns
+assert "--ns-policy" in Path(r_ns["launch"]).read_text(encoding="utf-8"), r_ns
+print("NAMESPACE_POLICY", r_ns["ns_policy"])
 PY
 
 # 3. JS SDK：discover（静态扫描）-> generate（plan + launch）
@@ -86,6 +99,19 @@ for (const name of ['manifest.json', 'hook_plan.json', 'sandbox.json', 'config.y
 }
 const plan = JSON.parse(fs.readFileSync(r.hook_plan, 'utf8'));
 if (plan.rawcalls.status !== 'placeholder') throw new Error('rawcalls placeholder missing');
+const policy = {
+  schema: 'vpoh.ns_policy.v1',
+  namespaces: {
+    crypto_pkg: { role: 'source', functions: ['encrypt'] },
+    flask_app: { role: 'sink', framework: 'flask' },
+  },
+  flows: [{ from: 'crypto_pkg', to: 'flask_app', action: 'deny' }],
+};
+const rNs = vpoh.generate(m, 'test/sdk_test/.vpo-js-ns', policy);
+if (!fs.existsSync(rNs.ns_policy)) throw new Error('missing ns_policy.json');
+if (!fs.readFileSync(rNs.launch, 'utf8').includes('--ns-policy')) {
+  throw new Error('launch.sh missing --ns-policy');
+}
 JS
 
 # 4. 校验生成的 subset .so 里确有 fopen/fopen64
@@ -118,7 +144,7 @@ PY
 
 # 7. 清理产物
 rm -f test/sdk_test/pydemo/demo_ext.so
-rm -rf test/sdk_test/.vpo test/sdk_test/.vpo-js
+rm -rf test/sdk_test/.vpo test/sdk_test/.vpo-js test/sdk_test/.vpo-ns test/sdk_test/.vpo-js-ns
 rm -f /tmp/vpo_manifest_py.json /tmp/vpo_manifest_js.json
 
 echo "SDK test OK"

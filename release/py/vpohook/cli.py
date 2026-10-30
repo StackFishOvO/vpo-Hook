@@ -673,7 +673,11 @@ def cmd_generate(args: argparse.Namespace) -> int:
             print("[vpo-hook] generate 需要 <path> 或 --manifest <file>", file=sys.stderr)
             return 1
         m = vpoh.discover(args.path, dynamic=bool(getattr(args, "dynamic", False)))
-    r = vpoh.generate(m, out_dir=getattr(args, "out", None))
+    r = vpoh.generate(
+        m,
+        out_dir=getattr(args, "out", None),
+        ns_policy=getattr(args, "ns_policy", None),
+    )
     print(json.dumps(r, ensure_ascii=False, indent=2))
     return 0
 
@@ -1307,6 +1311,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             extra = simple_list(simple_cfg, "permissions", "files", "extra_read") + \
                 simple_list(simple_cfg, "permissions", "files", "extra_write")
+            # 目标进程需要能读取 vpo-hook 自己的 sitecustomize/preload。
+            # 系统级安装时它不在 env_root 内，必须显式放行。
+            extra += [str(HERE), str(HERE / "plaintext")]
+            for candidate in (HERE / "js_plaintext", HERE.parent / "js" / "plaintext"):
+                if candidate.exists():
+                    extra.append(str(candidate))
+            extra = list(dict.fromkeys(extra))
             if extra:
                 env["VPO_EXTRA_PATHS"] = ":".join(expand_home(p) for p in extra)
 
@@ -1383,6 +1394,28 @@ def cmd_run(args: argparse.Namespace) -> int:
                 env["NODE_OPTIONS"] = (f"--require {preload} " + no).strip()
                 log(f"[vpo-hook] 名文 hook(js): {', '.join(apis)}")
 
+    # namespace 数据流守卫（L3-lite）：与简单组配置解耦，显式 --ns-policy 才启用
+    ns_policy = getattr(args, "ns_policy", None)
+    if ns_policy:
+        ns_path = Path(ns_policy).expanduser().resolve()
+        if not ns_path.exists():
+            print(f"[vpo-hook] namespace policy 不存在: {ns_path}", file=sys.stderr)
+            return 1
+        env["VPO_NS_POLICY"] = str(ns_path)
+        if lang == "python":
+            plaintext = HERE / "plaintext"
+            if not (plaintext / "sitecustomize.py").exists():
+                print("[vpo-hook] 缺少 plaintext/sitecustomize.py（打包不完整）", file=sys.stderr)
+                return 1
+            env["VPO_PYTHONPATH"] = str(plaintext)
+            pp = env.get("PYTHONPATH", "")
+            parts = [p for p in pp.split(os.pathsep) if p]
+            if str(plaintext) not in parts:
+                env["PYTHONPATH"] = os.pathsep.join([str(plaintext), *parts]) if parts else str(plaintext)
+            log(f"[vpo-hook] namespace guard(python): {ns_path}")
+        elif lang == "js":
+            log("[vpo-hook] namespace guard 目前仅支持 Python 目标")
+
     # 对象创建审计注入（默认关闭，只记录调用链）
     if config_text:
         audit_enabled, audit_log, audit_classes = _cfg_audit(cfg, lang)
@@ -1455,6 +1488,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("-v", "--verbose", action="store_true", help="输出详细诊断信息")
     r.add_argument("-H", "--hook", default=None, help="使用指定的 hook 库（复杂组定制，如 libvpo_<pkg>.so）")
     r.add_argument("--config", default=None, help="使用指定的配置文件（复杂组/SDK 生成）")
+    r.add_argument("--ns-policy", default=None, help="namespace 数据流策略（JSON，L3-lite）")
     r.add_argument("cmd", nargs=argparse.REMAINDER, help="目标命令及其参数")
     sub.add_parser("status", help="显示当前状态")
     sc = sub.add_parser("scan", help="扫描目录/文件的能力清单")
@@ -1484,6 +1518,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("path", nargs="?", default=None, help="目录或模块名")
     g.add_argument("--manifest", default=None, help="直接使用已有 manifest.json")
     g.add_argument("--out", default=None, help="输出目录")
+    g.add_argument("--ns-policy", default=None, help="namespace 数据流策略 JSON")
     g.add_argument("--dynamic", action="store_true", help="导入/require 目标做运行时反射")
 
     args = p.parse_args(argv)

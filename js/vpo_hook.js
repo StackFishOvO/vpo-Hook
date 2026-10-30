@@ -881,12 +881,14 @@ function cmdGenerate(args) {
   let target = null;
   let out = null;
   let manifestPath = null;
+  let nsPolicy = null;
   let dynamic = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--dynamic') { dynamic = true; continue; }
     if (a === '--out') { out = args[++i]; continue; }
     if (a === '--manifest') { manifestPath = args[++i]; continue; }
+    if (a === '--ns-policy') { nsPolicy = args[++i]; continue; }
     if (!target) target = a;
   }
   const vpoh = require('./vpoh.js');
@@ -895,12 +897,12 @@ function cmdGenerate(args) {
     m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   } else {
     if (!target) {
-      console.error('用法: vpo-hook generate <目录|模块名> [--out dir] [--manifest file] [--dynamic]');
+      console.error('用法: vpo-hook generate <目录|模块名> [--out dir] [--manifest file] [--ns-policy file] [--dynamic]');
       return 1;
     }
     m = vpoh.discover(target, { dynamic });
   }
-  const r = vpoh.generate(m, out);
+  const r = vpoh.generate(m, out, nsPolicy);
   console.log(JSON.stringify(r, null, 2));
   return 0;
 }
@@ -995,10 +997,12 @@ function cmdRun(args) {
   let verbose = process.env.VPO_HOOK_VERBOSE === '1';
   let hook = null;
   let config = null;
-  while (args.length && ['-q', '--quiet', '-v', '--verbose', '-H', '--hook', '--config'].includes(args[0])) {
+  let nsPolicy = null;
+  while (args.length && ['-q', '--quiet', '-v', '--verbose', '-H', '--hook', '--config', '--ns-policy'].includes(args[0])) {
     if (args[0] === '-q' || args[0] === '--quiet') quiet = true;
     else if (args[0] === '-H' || args[0] === '--hook') { hook = args[1]; args.shift(); }
     else if (args[0] === '--config') { config = args[1]; args.shift(); }
+    else if (args[0] === '--ns-policy') { nsPolicy = args[1]; args.shift(); }
     else verbose = true;
     args.shift();
   }
@@ -1008,7 +1012,7 @@ function cmdRun(args) {
   };
 
   if (args.length === 0) {
-    console.error('[vpo-hook] 用法: vpo-hook run [-q|-v] [-H <hook库>] [--config <配置文件>] <command...>');
+    console.error('[vpo-hook] 用法: vpo-hook run [-q|-v] [-H <hook库>] [--config <配置文件>] [--ns-policy <json>] <command...>');
     return 1;
   }
   const plat = process.platform;
@@ -1103,8 +1107,12 @@ function cmdRun(args) {
       const extra = [
         ...simpleList(simpleCfg, 'permissions', 'files', 'extra_read'),
         ...simpleList(simpleCfg, 'permissions', 'files', 'extra_write'),
+        // 目标进程需要读取 vpo-hook 自己的 sitecustomize/preload。
+        HERE,
+        PY_PLAINTEXT,
       ];
-      if (extra.length) env.VPO_EXTRA_PATHS = extra.map(expandHome).join(':');
+      if (fs.existsSync(JS_PLAINTEXT)) extra.push(JS_PLAINTEXT);
+      if (extra.length) env.VPO_EXTRA_PATHS = Array.from(new Set(extra)).map(expandHome).join(':');
     } else {
       log('[vpo-hook] 无法判定环境根目录，简单安全组文件作用域未启用');
     }
@@ -1180,6 +1188,28 @@ function cmdRun(args) {
         env.NODE_OPTIONS = `--require ${preload}` + (env.NODE_OPTIONS ? ' ' + env.NODE_OPTIONS : '');
         log(`[vpo-hook] 名文 hook(js): ${apis.join(', ')}`);
       }
+    }
+  }
+
+  if (nsPolicy) {
+    const nsPath = path.resolve(nsPolicy);
+    if (!fs.existsSync(nsPath)) {
+      console.error(`[vpo-hook] namespace policy 不存在: ${nsPath}`);
+      return 1;
+    }
+    env.VPO_NS_POLICY = nsPath;
+    if (lang === 'python') {
+      const site = path.join(PY_PLAINTEXT, 'sitecustomize.py');
+      if (!fs.existsSync(site)) {
+        console.error('[vpo-hook] 缺少 sitecustomize.py（打包不完整）');
+        return 1;
+      }
+      env.VPO_PYTHONPATH = PY_PLAINTEXT;
+      const parts = (env.PYTHONPATH || '').split(':').filter(Boolean);
+      if (!parts.includes(PY_PLAINTEXT)) env.PYTHONPATH = [PY_PLAINTEXT, ...parts].join(':');
+      log(`[vpo-hook] namespace guard(python): ${nsPath}`);
+    } else if (lang === 'js') {
+      log('[vpo-hook] namespace guard 目前仅支持 Python 目标');
     }
   }
 

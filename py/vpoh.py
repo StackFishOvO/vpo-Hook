@@ -708,7 +708,30 @@ def _simple_config_yaml(manifest: dict) -> str:
     )
 
 
-def generate(manifest: dict, out_dir: str | None = None, interactive: bool = False) -> dict:
+def _normalize_ns_policy(manifest: dict, ns_policy) -> dict:
+    if isinstance(ns_policy, (str, Path)):
+        policy = json.loads(Path(ns_policy).read_text(encoding="utf-8"))
+    elif isinstance(ns_policy, dict):
+        policy = json.loads(json.dumps(ns_policy))
+    else:
+        pkg = manifest.get("pkg", {}).get("name") or "pkg"
+        policy = {
+            "schema": "vpoh.ns_policy.v1",
+            "namespaces": {pkg: {"role": "package"}},
+            "flows": [],
+        }
+    policy.setdefault("schema", "vpoh.ns_policy.v1")
+    policy.setdefault("namespaces", {})
+    policy.setdefault("flows", [])
+    return policy
+
+
+def generate(
+    manifest: dict,
+    out_dir: str | None = None,
+    interactive: bool = False,
+    ns_policy: dict | str | None = None,
+) -> dict:
     manifest = _normalize_manifest(manifest)
     pkg = manifest.get("pkg", {}).get("name") or "pkg"
     safe = _safe_name(str(pkg))
@@ -733,7 +756,15 @@ def generate(manifest: dict, out_dir: str | None = None, interactive: bool = Fal
 
     _write_json(out / "manifest.json", manifest)
 
+    policy = _normalize_ns_policy(manifest, ns_policy)
+    _write_json(out / "ns_policy.json", policy)
+    ns_active = bool(policy.get("flows")) or any(
+        (cfg or {}).get("role") in ("source", "sink", "untrusted") or (cfg or {}).get("source") or (cfg or {}).get("sink")
+        for cfg in policy.get("namespaces", {}).values()
+    )
+
     sandbox = _sandbox_plan(manifest)
+    sandbox["namespace"] = {"policy": "ns_policy.json" if ns_active else None}
     _write_json(out / "sandbox.json", sandbox)
 
     hook_plan = {
@@ -759,11 +790,13 @@ def generate(manifest: dict, out_dir: str | None = None, interactive: bool = Fal
             },
         },
         "sandbox": sandbox,
+        "namespace": policy,
         "rawcalls": {"status": "placeholder", "syscalls": []},
         "artifacts": {
             "config": "config.yaml",
             "launch": "launch.sh",
             "sandbox": "sandbox.json",
+            "ns_policy": "ns_policy.json",
         },
     }
     _write_json(out / "hook_plan.json", hook_plan)
@@ -817,11 +850,12 @@ def generate(manifest: dict, out_dir: str | None = None, interactive: bool = Fal
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
 
     hook_arg = f' --hook "$HERE/{so.name}"' if so else ""
+    ns_arg = ' --ns-policy "$HERE/ns_policy.json"' if ns_active else ""
     launch = (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
-        f'exec vpo-hook run -q --config "$HERE/config.yaml"{hook_arg} "$@"\n'
+        f'exec vpo-hook run -q --config "$HERE/config.yaml"{hook_arg}{ns_arg} "$@"\n'
     )
     _write_text_exec(out / "launch.sh", launch)
 
@@ -833,5 +867,6 @@ def generate(manifest: dict, out_dir: str | None = None, interactive: bool = Fal
         "hook_plan": str(out / "hook_plan.json"),
         "sandbox": str(out / "sandbox.json"),
         "config": str(out / "config.yaml"),
+        "ns_policy": str(out / "ns_policy.json"),
         "launch": str(out / "launch.sh"),
     }
