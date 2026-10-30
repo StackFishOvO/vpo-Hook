@@ -658,14 +658,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 def cmd_discover(args: argparse.Namespace) -> int:
     import vpoh
-    m = vpoh.discover(args.path)
+    m = vpoh.discover(args.path, dynamic=bool(getattr(args, "dynamic", False)))
     print(json.dumps(m, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
     import vpoh
-    m = vpoh.discover(args.path)
+    manifest_path = getattr(args, "manifest", None)
+    if manifest_path:
+        m = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    else:
+        if not getattr(args, "path", None):
+            print("[vpo-hook] generate 需要 <path> 或 --manifest <file>", file=sys.stderr)
+            return 1
+        m = vpoh.discover(args.path, dynamic=bool(getattr(args, "dynamic", False)))
     r = vpoh.generate(m, out_dir=getattr(args, "out", None))
     print(json.dumps(r, ensure_ascii=False, indent=2))
     return 0
@@ -1203,17 +1210,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("[vpo-hook] hook 库不存在，请先运行: vpo-hook init", file=sys.stderr)
         return 1
 
-    # 读配置
-    config_text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
+    # 读配置（复杂组/SDK 生成的配置可通过 --config 指定）
+    custom_config = getattr(args, "config", None)
+    config_path = Path(custom_config).expanduser() if custom_config else CONFIG_PATH
+    sig_path = Path(str(config_path) + ".sig") if custom_config else SIG_PATH
+    config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
 
     # 配置签名校验（有 .sig 才校验；无则旧行为不校验）
-    if SIG_PATH.exists() and config_text:
+    if sig_path.exists() and config_text:
         key = load_sign_key(False)
         if key is None:
             print("[vpo-hook] 配置有签名但缺少密钥，拒绝运行", file=sys.stderr)
             return 1
         try:
-            env_sig = json.loads(SIG_PATH.read_text(encoding="utf-8"))
+            env_sig = json.loads(sig_path.read_text(encoding="utf-8"))
         except Exception:
             print("[vpo-hook] 配置签名文件损坏，拒绝运行", file=sys.stderr)
             return 1
@@ -1259,7 +1269,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         env["DYLD_INSERT_LIBRARIES"] = str(lib)
     else:
         env["LD_PRELOAD"] = str(lib)
-    env["VPO_HOOK_CONFIG"] = str(CONFIG_PATH)
+    env["VPO_HOOK_CONFIG"] = str(config_path)
     if deny_paths:
         env["VPO_DENY_PATHS"] = ":".join(expand_home(p) for p in deny_paths)
     if honeypot_map:
@@ -1444,6 +1454,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("-q", "--quiet", action="store_true", help="不输出启动器诊断信息")
     r.add_argument("-v", "--verbose", action="store_true", help="输出详细诊断信息")
     r.add_argument("-H", "--hook", default=None, help="使用指定的 hook 库（复杂组定制，如 libvpo_<pkg>.so）")
+    r.add_argument("--config", default=None, help="使用指定的配置文件（复杂组/SDK 生成）")
     r.add_argument("cmd", nargs=argparse.REMAINDER, help="目标命令及其参数")
     sub.add_parser("status", help="显示当前状态")
     sc = sub.add_parser("scan", help="扫描目录/文件的能力清单")
@@ -1468,9 +1479,12 @@ def main(argv: list[str] | None = None) -> int:
 
     d = sub.add_parser("discover", help="扫描包的能力候选面（信源 + 符号）")
     d.add_argument("path", help="目录或模块名")
+    d.add_argument("--dynamic", action="store_true", help="导入/require 目标做运行时反射")
     g = sub.add_parser("generate", help="discover 后生成定制 hook 二进制")
-    g.add_argument("path", help="目录或模块名")
+    g.add_argument("path", nargs="?", default=None, help="目录或模块名")
+    g.add_argument("--manifest", default=None, help="直接使用已有 manifest.json")
     g.add_argument("--out", default=None, help="输出目录")
+    g.add_argument("--dynamic", action="store_true", help="导入/require 目标做运行时反射")
 
     args = p.parse_args(argv)
     if args.command == "init":

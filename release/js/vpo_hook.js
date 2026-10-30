@@ -861,27 +861,45 @@ function cmdChain() {
 }
 
 function cmdDiscover(args) {
-  const target = args[0];
+  let target = null;
+  let dynamic = false;
+  for (const a of args) {
+    if (a === '--dynamic') dynamic = true;
+    else if (!target) target = a;
+  }
   if (!target) {
-    console.error('用法: vpo-hook discover <目录|模块名>');
+    console.error('用法: vpo-hook discover <目录|模块名> [--dynamic]');
     return 1;
   }
   const vpoh = require('./vpoh.js');
-  const m = vpoh.discover(target);
+  const m = vpoh.discover(target, { dynamic });
   console.log(JSON.stringify(m, null, 2));
   return 0;
 }
 
 function cmdGenerate(args) {
-  const target = args[0];
-  if (!target) {
-    console.error('用法: vpo-hook generate <目录|模块名> [--out dir]');
-    return 1;
+  let target = null;
+  let out = null;
+  let manifestPath = null;
+  let dynamic = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--dynamic') { dynamic = true; continue; }
+    if (a === '--out') { out = args[++i]; continue; }
+    if (a === '--manifest') { manifestPath = args[++i]; continue; }
+    if (!target) target = a;
   }
-  const outIdx = args.indexOf('--out');
-  const out = outIdx >= 0 ? args[outIdx + 1] : null;
   const vpoh = require('./vpoh.js');
-  const m = vpoh.discover(target);
+  let m;
+  if (manifestPath) {
+    m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } else {
+    if (!target) {
+      console.error('用法: vpo-hook generate <目录|模块名> [--out dir] [--manifest file] [--dynamic]');
+      return 1;
+    }
+    m = vpoh.discover(target, { dynamic });
+  }
   const r = vpoh.generate(m, out);
   console.log(JSON.stringify(r, null, 2));
   return 0;
@@ -976,9 +994,11 @@ function cmdRun(args) {
   let quiet = process.env.VPO_HOOK_QUIET === '1';
   let verbose = process.env.VPO_HOOK_VERBOSE === '1';
   let hook = null;
-  while (args.length && ['-q', '--quiet', '-v', '--verbose', '-H', '--hook'].includes(args[0])) {
+  let config = null;
+  while (args.length && ['-q', '--quiet', '-v', '--verbose', '-H', '--hook', '--config'].includes(args[0])) {
     if (args[0] === '-q' || args[0] === '--quiet') quiet = true;
     else if (args[0] === '-H' || args[0] === '--hook') { hook = args[1]; args.shift(); }
+    else if (args[0] === '--config') { config = args[1]; args.shift(); }
     else verbose = true;
     args.shift();
   }
@@ -988,7 +1008,7 @@ function cmdRun(args) {
   };
 
   if (args.length === 0) {
-    console.error('[vpo-hook] 用法: vpo-hook run [-q|-v] [-H <hook库>] <command...>');
+    console.error('[vpo-hook] 用法: vpo-hook run [-q|-v] [-H <hook库>] [--config <配置文件>] <command...>');
     return 1;
   }
   const plat = process.platform;
@@ -998,16 +1018,18 @@ function cmdRun(args) {
     return 1;
   }
 
-  const configText = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf8') : '';
+  const configPath = config ? path.resolve(config) : CONFIG_PATH;
+  const configSigPath = config ? `${configPath}.sig` : SIG_PATH;
+  const configText = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
 
-  if (fs.existsSync(SIG_PATH) && configText) {
+  if (fs.existsSync(configSigPath) && configText) {
     const key = loadSignKey(false);
     if (!key) {
       console.error('[vpo-hook] 配置有签名但缺少密钥，拒绝运行');
       return 1;
     }
     let envSig = null;
-    try { envSig = JSON.parse(fs.readFileSync(SIG_PATH, 'utf8')); } catch (_e) {
+    try { envSig = JSON.parse(fs.readFileSync(configSigPath, 'utf8')); } catch (_e) {
       console.error('[vpo-hook] 配置签名文件损坏，拒绝运行');
       return 1;
     }
@@ -1047,7 +1069,7 @@ function cmdRun(args) {
   const env = { ...process.env };
   if (plat === 'darwin') env.DYLD_INSERT_LIBRARIES = lib;
   else env.LD_PRELOAD = lib;
-  env.VPO_HOOK_CONFIG = CONFIG_PATH;
+  env.VPO_HOOK_CONFIG = configPath;
   if (denyPaths.length) env.VPO_DENY_PATHS = denyPaths.map(expandHome).join(':');
   if (Object.keys(honeypotMap).length) {
     env.VPO_REWRITE_MAP = Object.entries(honeypotMap)
