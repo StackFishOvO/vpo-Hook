@@ -1,6 +1,9 @@
 # Linux 迁移指南
 
 > 目标：让 VPO-Hook 从 macOS 扩展到标准 Linux（Ubuntu/Debian）及其他发行版（Arch 等）。
+>
+> 发布侧的旧 glibc 容器编译、macOS arm64/x86_64 dylib、预编译 fallback
+> 见 `GLIBC_MACOS_BUILD.md`。
 
 ---
 
